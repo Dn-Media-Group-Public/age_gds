@@ -44,14 +44,15 @@ CREATE FUNCTION age_gds.graph_drop(name text)
 
 CREATE FUNCTION age_gds.graph_list()
     RETURNS TABLE(
-        name        text,
-        age_graph   text,
-        node_count  bigint,
-        edge_count  bigint,
-        directed    boolean,
-        weighted    boolean,
-        file_path   text,
-        created_at  timestamptz
+        name          text,
+        age_graph     text,
+        node_count    bigint,
+        edge_count    bigint,
+        directed      boolean,
+        weighted      boolean,
+        file_path     text,
+        created_at    timestamptz,
+        "memoryUsage" bigint
     )
     AS 'age_gds', 'age_gds_graph_list'
     LANGUAGE C;
@@ -368,3 +369,122 @@ CREATE FUNCTION age_gds.maxFlow_stats(
 ) RETURNS TABLE(flow float8, "computeMillis" bigint)
     AS 'age_gds', 'age_gds_maxflow_stats'
     LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Write-back functions (stage 8)
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.pageRank_write(
+    graph_name      text    DEFAULT NULL,
+    write_property  text    DEFAULT 'pagerank',
+    damping_factor  float8  DEFAULT NULL,
+    max_iterations  int     DEFAULT NULL,
+    tolerance       float8  DEFAULT NULL,
+    age_graph       text    DEFAULT NULL,
+    node_query      text    DEFAULT NULL,
+    edge_query      text    DEFAULT NULL
+) RETURNS void
+    AS 'age_gds', 'age_gds_pagerank_write'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.betweenness_write(
+    graph_name      text    DEFAULT NULL,
+    write_property  text    DEFAULT 'betweenness',
+    age_graph       text    DEFAULT NULL,
+    node_query      text    DEFAULT NULL,
+    edge_query      text    DEFAULT NULL
+) RETURNS void
+    AS 'age_gds', 'age_gds_betweenness_write'
+    LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Node similarity and KNN (stage 8)
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.nodeSimilarity_stream(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(node1 bigint, node2 bigint, similarity float8)
+    AS 'age_gds', 'age_gds_nodesimilarity_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.knn_stream(
+    graph_name text DEFAULT NULL,
+    top_k      int  DEFAULT 5,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE("sourceNodeId" bigint, "targetNodeId" bigint, similarity float8, rank int)
+    AS 'age_gds', 'age_gds_knn_stream'
+    LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Link prediction (stage 8)
+-- Uses NetworKit link predictors; runAll() scores unconnected node pairs.
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.linkprediction_adamicAdar_stream(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
+    AS 'age_gds', 'age_gds_linkpred_adamicadar_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_commonNeighbors_stream(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
+    AS 'age_gds', 'age_gds_linkpred_commonneighbors_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_preferentialAttachment_stream(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
+    AS 'age_gds', 'age_gds_linkpred_preferentialattachment_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_resourceAllocation_stream(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
+    AS 'age_gds', 'age_gds_linkpred_resourceallocation_stream'
+    LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Node embeddings (stage 8)
+-- NetworKit::Node2Vec: biased random-walk embeddings.
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.node2vec_stream(
+    graph_name      text    DEFAULT NULL,
+    embedding_dim   int     DEFAULT 64,
+    walk_length     int     DEFAULT 80,
+    walks_per_node  int     DEFAULT 10,
+    p               float8  DEFAULT 1.0,
+    q               float8  DEFAULT 1.0,
+    age_graph       text    DEFAULT NULL,
+    node_query      text    DEFAULT NULL,
+    edge_query      text    DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, embedding float8[])
+    AS 'age_gds', 'age_gds_node2vec_stream'
+    LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Staleness helper (stage 8)
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.graph_is_stale(name text)
+    RETURNS boolean
+    AS 'age_gds', 'age_gds_graph_is_stale'
+    LANGUAGE C STRICT;

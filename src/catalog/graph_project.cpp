@@ -117,6 +117,7 @@ PG_FUNCTION_INFO_V1(age_gds_graph_project);
 PG_FUNCTION_INFO_V1(age_gds_graph_drop);
 PG_FUNCTION_INFO_V1(age_gds_graph_list);
 PG_FUNCTION_INFO_V1(age_gds_graph_exists);
+PG_FUNCTION_INFO_V1(age_gds_graph_is_stale);
 
 /* --------------------------------------------------- graph_project -------- */
 
@@ -278,14 +279,22 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
         HeapTuple spi_tup  = SPI_tuptable->vals[i];
         TupleDesc spi_desc = SPI_tuptable->tupdesc;
 
-        Datum values[8];
-        bool  isnull[8];
+        Datum values[9];
+        bool  isnull[9];
         bool  is_null;
 
         for (int j = 0; j < 8; j++) {
             values[j] = SPI_getbinval(spi_tup, spi_desc, j + 1, &is_null);
             isnull[j] = is_null;
         }
+
+        /* memoryUsage = node_count * 8 + edge_count * 20
+         * SPI cols (1-indexed): 3=node_count, 4=edge_count
+         * values[] (0-indexed): values[2]=node_count, values[3]=edge_count */
+        int64_t nc = isnull[2] ? 0 : DatumGetInt64(values[2]);
+        int64_t ec = isnull[3] ? 0 : DatumGetInt64(values[3]);
+        values[8] = Int64GetDatum(nc * 8 + ec * 20);
+        isnull[8] = false;
 
         tuplestore_putvalues(tupstore, tupdesc, values, isnull);
     }
@@ -320,6 +329,84 @@ Datum age_gds_graph_exists(PG_FUNCTION_ARGS)
     SPI_finish();
 
     PG_RETURN_BOOL(found);
+}
+
+/* --------------------------------------------------- graph_is_stale ------- */
+
+Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
+{
+    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    char  age_graph_buf[256] = {0};
+
+    /* === SPI session 1: catalog lookup === */
+    SPI_connect();
+
+    {
+        Oid   argtypes[1] = {TEXTOID};
+        Datum args[1]     = {CStringGetTextDatum(name_str)};
+
+        int ret = SPI_execute_with_args(
+            "SELECT age_graph FROM age_gds.graphs WHERE name = $1",
+            1, argtypes, args, nullptr, true, 1);
+
+        if (ret != SPI_OK_SELECT) {
+            SPI_finish();
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_is_stale: catalog query failed (SPI %d)", ret)));
+        }
+
+        if (SPI_processed == 0) {
+            SPI_finish();
+            ereport(ERROR,
+                    (errcode(ERRCODE_UNDEFINED_OBJECT),
+                     errmsg("graph \"%s\" does not exist", name_str)));
+        }
+
+        bool  isnull = false;
+        Datum d      = SPI_getbinval(SPI_tuptable->vals[0],
+                                      SPI_tuptable->tupdesc, 1, &isnull);
+        if (!isnull) {
+            char *ag = TextDatumGetCString(d);
+            strlcpy(age_graph_buf, ag, sizeof(age_graph_buf));
+        }
+    }
+
+    SPI_finish();
+
+    /* === SPI session 2: staleness check via pg_stat_user_tables === */
+    /* If n_mod_since_analyze > 0, the AGE graph has been modified since
+     * the last analyze — treat as potentially stale.
+     * If no stat row exists yet, return false (cannot determine). */
+    bool stale = false;
+
+    SPI_connect();
+
+    {
+        Oid   argtypes[1] = {TEXTOID};
+        Datum args[1]     = {CStringGetTextDatum(age_graph_buf)};
+
+        int ret = SPI_execute_with_args(
+            "SELECT coalesce(n_mod_since_analyze, 0) > 0 "
+            "FROM pg_stat_user_tables "
+            "WHERE schemaname = $1 "
+            "  AND relname = '_ag_label_vertex' "
+            "LIMIT 1",
+            1, argtypes, args, nullptr, true, 1);
+
+        if (ret == SPI_OK_SELECT && SPI_processed > 0) {
+            bool  isnull = false;
+            Datum d      = SPI_getbinval(SPI_tuptable->vals[0],
+                                          SPI_tuptable->tupdesc, 1, &isnull);
+            if (!isnull)
+                stale = DatumGetBool(d);
+        }
+        /* else: no stat row → return false (not stale / unknown) */
+    }
+
+    SPI_finish();
+
+    PG_RETURN_BOOL(stale);
 }
 
 } // extern "C"

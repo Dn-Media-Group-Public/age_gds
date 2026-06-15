@@ -28,9 +28,13 @@ add_library(age_gds MODULE
     src/bridge/age_loader.cpp
     src/util/config_parser.cpp
     src/util/srf_helper.cpp
+    src/util/writeback.cpp
     src/algorithms/centrality.cpp
     src/algorithms/community.cpp
     src/algorithms/pathfinding.cpp
+    src/algorithms/similarity.cpp
+    src/algorithms/linkprediction.cpp
+    src/algorithms/embedding.cpp
 )
 
 target_include_directories(age_gds PRIVATE
