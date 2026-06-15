@@ -60,3 +60,17 @@ CREATE FUNCTION age_gds.graph_exists(name text)
     RETURNS boolean
     AS 'age_gds', 'age_gds_graph_exists'
     LANGUAGE C STRICT;
+
+-- -------------------------------------------------------------------------
+-- Session cache
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.cache_stats()
+    RETURNS TABLE(entry_count int, total_bytes bigint, limit_bytes bigint)
+    AS 'age_gds', 'age_gds_cache_stats'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.cache_load(graph_name text)
+    RETURNS void
+    AS 'age_gds', 'age_gds_cache_load'
+    LANGUAGE C STRICT;

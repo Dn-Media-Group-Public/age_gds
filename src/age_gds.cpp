@@ -14,6 +14,9 @@ PG_MODULE_MAGIC;
 static int  session_cache_mb = 512;
 static char *data_dir = NULL;
 
+/* Forward declaration — defined in catalog/session_cache.cpp */
+void session_cache_register_exit_hook();
+
 extern "C" void _PG_init(void);
 
 void _PG_init(void)
@@ -41,6 +44,8 @@ void _PG_init(void)
         0,
         NULL, NULL, NULL
     );
+
+    session_cache_register_exit_hook();
 }
 
 extern "C" {

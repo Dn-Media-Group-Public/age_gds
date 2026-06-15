@@ -6,6 +6,7 @@
 #include <networkit/Globals.hpp>
 
 #include "catalog/serialization.h"
+#include "catalog/session_cache.h"
 #include "bridge/age_loader.h"
 
 #include <string>
@@ -240,6 +241,9 @@ Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
 
     if (file_path[0] != '\0')
         (void) unlink(file_path);
+
+    /* Evict from session cache if loaded */
+    session_cache_invalidate(name_str);
 
     PG_RETURN_VOID();
 }
