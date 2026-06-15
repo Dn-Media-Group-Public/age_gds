@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 project(age_gds CXX)
 set(CMAKE_CXX_STANDARD 20)
 
-# NetworKit submodule
+# NetworKit submodule — build as static lib so age_gds.so is self-contained
+# -fPIC required because we link into a shared module (.so)
+set(NETWORKIT_STATIC ON CACHE BOOL "Build static libraries" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory(third_party/networkit EXCLUDE_FROM_ALL)
 
 # OpenMP (required by NetworKit)
@@ -19,6 +22,8 @@ execute_process(COMMAND ${PG_CONFIG} --sharedir
 
 add_library(age_gds MODULE
     src/age_gds.cpp
+    src/catalog/serialization.cpp
+    src/catalog/graph_project.cpp
 )
 
 target_include_directories(age_gds PRIVATE
