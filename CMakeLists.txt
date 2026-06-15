@@ -29,6 +29,8 @@ add_library(age_gds MODULE
     src/util/config_parser.cpp
     src/util/srf_helper.cpp
     src/algorithms/centrality.cpp
+    src/algorithms/community.cpp
+    src/algorithms/pathfinding.cpp
 )
 
 target_include_directories(age_gds PRIVATE
