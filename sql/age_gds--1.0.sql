@@ -80,21 +80,27 @@ CREATE FUNCTION age_gds.cache_load(graph_name text)
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.pageRank_stream(
-    graph_name     text,
+    graph_name     text   DEFAULT NULL,
     damping_factor float8 DEFAULT NULL,
     max_iterations int    DEFAULT NULL,
     tolerance      float8 DEFAULT NULL,
-    config         jsonb  DEFAULT NULL
+    config         jsonb  DEFAULT NULL,
+    age_graph      text   DEFAULT NULL,
+    node_query     text   DEFAULT NULL,
+    edge_query     text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_pagerank_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.pageRank_stats(
-    graph_name     text,
+    graph_name     text   DEFAULT NULL,
     damping_factor float8 DEFAULT NULL,
     max_iterations int    DEFAULT NULL,
     tolerance      float8 DEFAULT NULL,
-    config         jsonb  DEFAULT NULL
+    config         jsonb  DEFAULT NULL,
+    age_graph      text   DEFAULT NULL,
+    node_query     text   DEFAULT NULL,
+    edge_query     text   DEFAULT NULL
 ) RETURNS TABLE("ranIterations" int, "didConverge" bool, "computeMillis" bigint,
                 "minScore" float8, "maxScore" float8, "meanScore" float8)
     AS 'age_gds', 'age_gds_pagerank_stats'
@@ -105,182 +111,260 @@ CREATE FUNCTION age_gds.pageRank_stats(
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.betweenness_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_betweenness_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.closeness_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_closeness_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.harmonicCentrality_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_harmoniccentrality_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.degree_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_degree_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.eigenvector_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_eigenvector_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- HITS: NetworKit has no HITS class; EigenvectorCentrality used for both
 -- hub and auth scores (equivalent for undirected graphs).
 CREATE FUNCTION age_gds.hits_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, auth float8, hub float8)
     AS 'age_gds', 'age_gds_hits_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.articleRank_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_articlerank_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- articulationPoints: uses BiconnectedComponents (no dedicated class in NetworKit)
 CREATE FUNCTION age_gds.articulationPoints_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint)
     AS 'age_gds', 'age_gds_articulationpoints_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- -------------------------------------------------------------------------
 -- Community detection algorithms
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.louvain_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_louvain_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.leiden_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_leiden_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.labelPropagation_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_labelpropagation_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.wcc_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "componentId" bigint)
     AS 'age_gds', 'age_gds_wcc_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.scc_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "componentId" bigint)
     AS 'age_gds', 'age_gds_scc_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.kCore_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "coreNumber" bigint)
     AS 'age_gds', 'age_gds_kcore_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.triangleCount_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "triangleCount" bigint)
     AS 'age_gds', 'age_gds_trianglecount_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.localClusteringCoefficient_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, coefficient float8)
     AS 'age_gds', 'age_gds_localclusteringcoefficient_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.modularity_stats(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE(modularity float8)
     AS 'age_gds', 'age_gds_modularity_stats'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- -------------------------------------------------------------------------
 -- Path-finding algorithms
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.bfs_stream(
-    graph_name  text,
-    source_node bigint
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_bfs_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.shortestPath_dijkstra_stream(
-    graph_name  text,
-    source_node bigint
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_shortestpath_dijkstra_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- deltaStepping: NetworKit has no DeltaStepping class; Dijkstra used as
 -- equivalent for non-negative weight graphs.
 CREATE FUNCTION age_gds.deltaStepping_stream(
-    graph_name  text,
-    source_node bigint
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_deltastepping_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- bellmanFord: NetworKit has no standalone BellmanFord; Dijkstra fallback.
 CREATE FUNCTION age_gds.bellmanFord_stream(
-    graph_name  text,
-    source_node bigint
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_bellmanford_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.dfs_stream(
-    graph_name  text,
-    source_node bigint
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, depth int)
     AS 'age_gds', 'age_gds_dfs_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- randomWalk: NetworKit has no RandomWalk class; implemented using
 -- Aux::Random::choice + NetworKit::Graph::forNeighborsOf.
 CREATE FUNCTION age_gds.randomWalk_stream(
-    graph_name  text,
-    source_node bigint,
-    walk_length int DEFAULT 10
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    walk_length int    DEFAULT 10,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint)
     AS 'age_gds', 'age_gds_randomwalk_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.spanningTree_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE(src bigint, dst bigint, cost float8)
     AS 'age_gds', 'age_gds_spanningtree_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.allShortestPaths_stream(
-    graph_name text
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
 ) RETURNS TABLE("sourceNodeId" bigint, "targetNodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_allshortestpaths_stream'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.maxFlow_stats(
-    graph_name  text,
-    source_node bigint,
-    target_node bigint
+    graph_name  text   DEFAULT NULL,
+    source_node bigint DEFAULT NULL,
+    target_node bigint DEFAULT NULL,
+    age_graph   text   DEFAULT NULL,
+    node_query  text   DEFAULT NULL,
+    edge_query  text   DEFAULT NULL
 ) RETURNS TABLE(flow float8, "computeMillis" bigint)
     AS 'age_gds', 'age_gds_maxflow_stats'
-    LANGUAGE C STRICT;
+    LANGUAGE C;

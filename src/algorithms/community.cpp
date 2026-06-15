@@ -49,6 +49,17 @@ static void emit_partition(SRFState &s,
     });
 }
 
+// Helper: resolve graph for simple 1-arg functions.
+// Layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query
+static GraphHandle resolve_graph_args(FunctionCallInfo fcinfo)
+{
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    return get_or_load_graph(gname, agraph, nq, eq);
+}
+
 extern "C" {
 
 PG_FUNCTION_INFO_V1(age_gds_louvain_stream);
@@ -65,8 +76,8 @@ PG_FUNCTION_INFO_V1(age_gds_modularity_stats);
 
 Datum age_gds_louvain_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::PLM algo(pg.graph);
     try { algo.run(); }
@@ -85,8 +96,8 @@ Datum age_gds_louvain_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_leiden_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::ParallelLeiden algo(pg.graph);
     try { algo.run(); }
@@ -105,8 +116,8 @@ Datum age_gds_leiden_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_labelpropagation_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::PLP algo(pg.graph);
     try { algo.run(); }
@@ -125,8 +136,8 @@ Datum age_gds_labelpropagation_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_wcc_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::ConnectedComponents algo(pg.graph);
     try { algo.run(); }
@@ -152,8 +163,8 @@ Datum age_gds_wcc_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_scc_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::StronglyConnectedComponents algo(pg.graph);
     try { algo.run(); }
@@ -179,8 +190,8 @@ Datum age_gds_scc_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_kcore_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::CoreDecomposition algo(pg.graph);
     try { algo.run(); }
@@ -208,8 +219,8 @@ Datum age_gds_kcore_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_trianglecount_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::LocalClusteringCoefficient algo(pg.graph);
     try { algo.run(); }
@@ -240,8 +251,8 @@ Datum age_gds_trianglecount_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_localclusteringcoefficient_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::LocalClusteringCoefficient algo(pg.graph);
     try { algo.run(); }
@@ -267,8 +278,8 @@ Datum age_gds_localclusteringcoefficient_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_modularity_stats(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::PLM plm(pg.graph);
     try { plm.run(); }

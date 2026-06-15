@@ -39,13 +39,14 @@ extern "C" {
 
 /* ---------------------------------------------------------------- helpers */
 
-static void get_args(
+// Helper: extract graph (from cache or anonymous) + PageRank config.
+// pageRank arg layout:
+//   0=graph_name, 1=damping_factor, 2=max_iterations, 3=tolerance,
+//   4=config, 5=age_graph, 6=node_query, 7=edge_query
+static GraphHandle get_args(
     FunctionCallInfo fcinfo,
-    char           **graph_name_out,
     PageRankConfig  *cfg_out)
 {
-    *graph_name_out = text_to_cstring(PG_GETARG_TEXT_PP(0));
-
     bool   has_damping  = !PG_ARGISNULL(1);
     double damping      = has_damping  ? PG_GETARG_FLOAT8(1) : 0.85;
     bool   has_max_iter = !PG_ARGISNULL(2);
@@ -60,6 +61,23 @@ static void get_args(
         has_damping,  damping,
         has_max_iter, max_iter,
         has_tol,      tol);
+
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(5) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(5));
+    const char *nq     = PG_ARGISNULL(6) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(6));
+    const char *eq     = PG_ARGISNULL(7) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(7));
+    return get_or_load_graph(gname, agraph, nq, eq);
+}
+
+// Helper: resolve graph for simple 1-arg functions.
+// New layout: 0=graph_name, age_graph_idx=age_graph, +1=node_query, +2=edge_query
+static GraphHandle resolve_graph_args(FunctionCallInfo fcinfo, int age_graph_idx)
+{
+    const char *gname  = PG_ARGISNULL(0)                  ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(age_graph_idx)     ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx));
+    const char *nq     = PG_ARGISNULL(age_graph_idx + 1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx + 1));
+    const char *eq     = PG_ARGISNULL(age_graph_idx + 2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx + 2));
+    return get_or_load_graph(gname, agraph, nq, eq);
 }
 
 /* ============================================================ C functions */
@@ -81,11 +99,9 @@ PG_FUNCTION_INFO_V1(age_gds_articulationpoints_stream);
 
 Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
 {
-    char          *graph_name;
     PageRankConfig cfg;
-    get_args(fcinfo, &graph_name, &cfg);
-
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle    gh = get_args(fcinfo, &cfg);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::PageRank pr(pg.graph, cfg.damping_factor, cfg.tolerance);
     pr.maxIterations = (NetworKit::count)cfg.max_iterations;
@@ -121,11 +137,9 @@ Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_pagerank_stats(PG_FUNCTION_ARGS)
 {
-    char          *graph_name;
     PageRankConfig cfg;
-    get_args(fcinfo, &graph_name, &cfg);
-
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle    gh = get_args(fcinfo, &cfg);
+    const ProjectedGraph &pg = *gh.pg;
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -185,8 +199,8 @@ Datum age_gds_pagerank_stats(PG_FUNCTION_ARGS)
 
 Datum age_gds_betweenness_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::Betweenness algo(pg.graph, false);
     try { algo.run(); }
@@ -212,8 +226,8 @@ Datum age_gds_betweenness_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_closeness_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     // GENERALIZED variant works for disconnected graphs too
     NetworKit::Closeness algo(pg.graph, false, NetworKit::ClosenessVariant::GENERALIZED);
@@ -240,8 +254,8 @@ Datum age_gds_closeness_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_harmoniccentrality_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::HarmonicCloseness algo(pg.graph, false);
     try { algo.run(); }
@@ -267,8 +281,8 @@ Datum age_gds_harmoniccentrality_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_degree_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::DegreeCentrality algo(pg.graph, false);
     try { algo.run(); }
@@ -294,8 +308,8 @@ Datum age_gds_degree_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_eigenvector_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::EigenvectorCentrality algo(pg.graph);
     try { algo.run(); }
@@ -324,8 +338,8 @@ Datum age_gds_eigenvector_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_hits_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::EigenvectorCentrality algo(pg.graph);
     try { algo.run(); }
@@ -355,8 +369,8 @@ Datum age_gds_hits_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_articlerank_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::PageRank pr(pg.graph, 0.85, 1e-6);
     pr.maxIterations = 20;
@@ -387,8 +401,8 @@ Datum age_gds_articlerank_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_articulationpoints_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::BiconnectedComponents bcc(pg.graph);
     try { bcc.run(); }

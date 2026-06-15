@@ -188,6 +188,48 @@ void session_cache_register_exit_hook()
     on_proc_exit(session_cache_exit_cb, (Datum) 0);
 }
 
+/* ---------------------------------------------------------------- anonymous-load helper */
+
+GraphHandle get_or_load_graph(
+    const char *graph_name,
+    const char *age_graph,
+    const char *node_query,
+    const char *edge_query,
+    bool        directed,
+    bool        weighted)
+{
+    if (graph_name && age_graph)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("supply graph_name OR age_graph, not both")));
+    if (!graph_name && !age_graph)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("must supply graph_name or age_graph")));
+
+    GraphHandle h;
+    if (graph_name) {
+        h.pg = &session_cache_get(graph_name);
+    } else {
+        if (!node_query || !edge_query)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("age_graph requires node_query and edge_query")));
+        LoadedGraph lg = age_load_graph(age_graph, node_query, edge_query,
+                                        directed, weighted);
+        h.owned.emplace();
+        h.owned->name         = age_graph;
+        h.owned->graph        = std::move(lg.graph);
+        h.owned->id_map       = std::move(lg.id_map);
+        h.owned->directed     = directed;
+        h.owned->weighted     = weighted;
+        h.owned->approx_bytes = 0;
+        h.owned->last_used    = std::chrono::steady_clock::now();
+        h.pg = &*h.owned;
+    }
+    return h;
+}
+
 /* ---------------------------------------------------------------- SQL functions */
 
 extern "C" {

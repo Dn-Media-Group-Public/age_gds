@@ -4,11 +4,13 @@
 #include <networkit/graph/Graph.hpp>
 #include <networkit/Globals.hpp>
 #include "bridge/node_id_map.h"
+#include "bridge/age_loader.h"
 
 #include <string>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 struct ProjectedGraph {
     std::string              name;
@@ -48,3 +50,34 @@ void session_cache_invalidate(const char *graph_name);
 
 // Clear entire cache.
 void session_cache_clear();
+
+// -------------------------------------------------------------------
+// Anonymous / cached graph resolution
+// -------------------------------------------------------------------
+
+// GraphHandle owns the graph for anonymous execution, or holds a
+// pointer to a cache entry for named projections.
+struct GraphHandle {
+    const ProjectedGraph          *pg;
+    std::optional<ProjectedGraph>  owned;
+
+    GraphHandle() : pg(nullptr) {}
+    GraphHandle(const GraphHandle &) = delete;
+    GraphHandle &operator=(const GraphHandle &) = delete;
+    GraphHandle(GraphHandle &&) = default;
+    GraphHandle &operator=(GraphHandle &&) = default;
+};
+
+// Resolve a graph from either the session cache (graph_name non-null)
+// or an anonymous AGE load (age_graph non-null).
+// Exactly one of graph_name / age_graph must be non-null.
+// If age_graph is used, node_query and edge_query must also be non-null.
+// Raises ERROR on invalid combinations.
+GraphHandle get_or_load_graph(
+    const char *graph_name,
+    const char *age_graph,
+    const char *node_query,
+    const char *edge_query,
+    bool        directed = false,
+    bool        weighted = false
+);

@@ -40,10 +40,24 @@ extern "C" {
 #include "catalog/session_cache.h"
 #include "util/srf_helper.h"
 
+/* helper: resolve graph for functions with varying arg layout.
+ * age_graph_idx = position of the age_graph argument. */
+static GraphHandle resolve_graph_args(FunctionCallInfo fcinfo, int age_graph_idx)
+{
+    const char *gname  = PG_ARGISNULL(0)                  ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(age_graph_idx)     ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx));
+    const char *nq     = PG_ARGISNULL(age_graph_idx + 1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx + 1));
+    const char *eq     = PG_ARGISNULL(age_graph_idx + 2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx + 2));
+    return get_or_load_graph(gname, agraph, nq, eq);
+}
+
 /* helper: get source NetworKit node from AGE graphid arg (arg index 1) */
 static NetworKit::node get_source_node(FunctionCallInfo fcinfo,
                                        const ProjectedGraph &pg)
 {
+    if (PG_ARGISNULL(1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("source_node is required")));
     int64_t age_src = PG_GETARG_INT64(1);
     auto it = pg.id_map.graphid_to_nk.find(age_src);
     if (it == pg.id_map.graphid_to_nk.end())
@@ -68,8 +82,8 @@ PG_FUNCTION_INFO_V1(age_gds_maxflow_stats);
 
 Datum age_gds_bfs_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 2);
+    const ProjectedGraph &pg = *gh.pg;
     NetworKit::node src = get_source_node(fcinfo, pg);
 
     NetworKit::BFS algo(pg.graph, src, false);
@@ -98,8 +112,8 @@ Datum age_gds_bfs_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_shortestpath_dijkstra_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 2);
+    const ProjectedGraph &pg = *gh.pg;
     NetworKit::node src = get_source_node(fcinfo, pg);
 
     NetworKit::Dijkstra algo(pg.graph, src, false);
@@ -130,8 +144,8 @@ Datum age_gds_shortestpath_dijkstra_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_deltastepping_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 2);
+    const ProjectedGraph &pg = *gh.pg;
     NetworKit::node src = get_source_node(fcinfo, pg);
 
     NetworKit::Dijkstra algo(pg.graph, src, false);
@@ -163,8 +177,8 @@ Datum age_gds_deltastepping_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_bellmanford_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 2);
+    const ProjectedGraph &pg = *gh.pg;
     NetworKit::node src = get_source_node(fcinfo, pg);
 
     NetworKit::Dijkstra algo(pg.graph, src, false);
@@ -195,8 +209,8 @@ Datum age_gds_bellmanford_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_dfs_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 2);
+    const ProjectedGraph &pg = *gh.pg;
     NetworKit::node src = get_source_node(fcinfo, pg);
 
     std::vector<int64_t> depth(pg.graph.upperNodeIdBound(), -1);
@@ -235,8 +249,8 @@ Datum age_gds_dfs_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_randomwalk_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 3);
+    const ProjectedGraph &pg = *gh.pg;
     NetworKit::node src = get_source_node(fcinfo, pg);
 
     int walk_length = PG_ARGISNULL(2) ? 10 : PG_GETARG_INT32(2);
@@ -272,8 +286,8 @@ Datum age_gds_randomwalk_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_spanningtree_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::SpanningForest sf(pg.graph);
     try { sf.run(); }
@@ -301,8 +315,8 @@ Datum age_gds_spanningtree_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_allshortestpaths_stream(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::APSP algo(pg.graph);
     try { algo.run(); }
@@ -332,8 +346,15 @@ Datum age_gds_allshortestpaths_stream(PG_FUNCTION_ARGS)
 
 Datum age_gds_maxflow_stats(PG_FUNCTION_ARGS)
 {
-    char *graph_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    const ProjectedGraph &pg = session_cache_get(graph_name);
+    GraphHandle gh = resolve_graph_args(fcinfo, 3);
+    const ProjectedGraph &pg = *gh.pg;
+
+    if (PG_ARGISNULL(1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("source_node is required")));
+    if (PG_ARGISNULL(2))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("target_node is required")));
 
     int64_t age_src  = PG_GETARG_INT64(1);
     int64_t age_sink = PG_GETARG_INT64(2);
