@@ -26,6 +26,9 @@ add_library(age_gds MODULE
     src/catalog/graph_project.cpp
     src/catalog/session_cache.cpp
     src/bridge/age_loader.cpp
+    src/util/config_parser.cpp
+    src/util/srf_helper.cpp
+    src/algorithms/centrality.cpp
 )
 
 target_include_directories(age_gds PRIVATE
@@ -33,6 +36,8 @@ target_include_directories(age_gds PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/third_party/networkit/include
     ${CMAKE_SOURCE_DIR}/third_party/networkit/extlibs/tlx
+    ${CMAKE_SOURCE_DIR}/src/util
+    ${CMAKE_SOURCE_DIR}/src/algorithms
 )
 
 # Link NetworKit and OpenMP

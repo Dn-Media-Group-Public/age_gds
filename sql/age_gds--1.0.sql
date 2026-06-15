@@ -74,3 +74,28 @@ CREATE FUNCTION age_gds.cache_load(graph_name text)
     RETURNS void
     AS 'age_gds', 'age_gds_cache_load'
     LANGUAGE C STRICT;
+
+-- -------------------------------------------------------------------------
+-- Centrality algorithms
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.pageRank_stream(
+    graph_name     text,
+    damping_factor float8 DEFAULT NULL,
+    max_iterations int    DEFAULT NULL,
+    tolerance      float8 DEFAULT NULL,
+    config         jsonb  DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, score float8)
+    AS 'age_gds', 'age_gds_pagerank_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.pageRank_stats(
+    graph_name     text,
+    damping_factor float8 DEFAULT NULL,
+    max_iterations int    DEFAULT NULL,
+    tolerance      float8 DEFAULT NULL,
+    config         jsonb  DEFAULT NULL
+) RETURNS TABLE("ranIterations" int, "didConverge" bool, "computeMillis" bigint,
+                "minScore" float8, "maxScore" float8, "meanScore" float8)
+    AS 'age_gds', 'age_gds_pagerank_stats'
+    LANGUAGE C;
