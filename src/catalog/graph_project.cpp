@@ -6,7 +6,7 @@
 #include <networkit/Globals.hpp>
 
 #include "catalog/serialization.h"
-#include "bridge/node_id_map.h"
+#include "bridge/age_loader.h"
 
 #include <string>
 #include <stdexcept>
@@ -122,8 +122,11 @@ PG_FUNCTION_INFO_V1(age_gds_graph_exists);
 Datum age_gds_graph_project(PG_FUNCTION_ARGS)
 {
     char *name_str       = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    char *node_query_str = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    char *edge_query_str = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    char *age_graph_str  = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    char *node_query_str = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    char *edge_query_str = text_to_cstring(PG_GETARG_TEXT_PP(3));
+    bool  directed       = PG_GETARG_BOOL(4);
+    bool  weighted       = PG_GETARG_BOOL(5);
 
     /* Expand data_dir */
     const char *raw_dir = GetConfigOption("age_gds.data_dir", false, false);
@@ -144,19 +147,13 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
     /* Track pending file for abort cleanup */
     strlcpy(g_pending_bin, file_path, MAXPGPATH);
 
-    /* ---- Stub loader: 3 nodes, 3 edges, unweighted, undirected ---- */
+    /* ---- Load graph from AGE via Cypher queries ---- */
+    LoadedGraph loaded = age_load_graph(
+        age_graph_str, node_query_str, edge_query_str, directed, weighted);
+
+    /* ---- Serialize to .bin file ---- */
     try {
-        NetworKit::Graph g(3, false, false);
-        g.addEdge(0, 1);
-        g.addEdge(1, 2);
-        g.addEdge(0, 2);
-
-        NodeIdMap id_map;
-        id_map.intern(1); /* nk::node 0 -> graphid 1 */
-        id_map.intern(2); /* nk::node 1 -> graphid 2 */
-        id_map.intern(3); /* nk::node 2 -> graphid 3 */
-
-        gds_serialize(file_path, g, id_map, false, false);
+        gds_serialize(file_path, loaded.graph, loaded.id_map, directed, weighted);
     } catch (const std::exception &ex) {
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
@@ -166,25 +163,33 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
     /* ---- Insert catalog row via SPI ---- */
     SPI_connect();
 
-    int64_t node_count = 3;
-    int64_t edge_count = 3;
+    int64_t node_count = (int64_t) loaded.graph.numberOfNodes();
+    int64_t edge_count = (int64_t) loaded.graph.numberOfEdges();
 
-    Oid    argtypes[6] = {TEXTOID, TEXTOID, TEXTOID, INT8OID, INT8OID, TEXTOID};
-    Datum  args[6]     = {
-        CStringGetTextDatum(name_str),
-        CStringGetTextDatum(node_query_str),
-        CStringGetTextDatum(edge_query_str),
-        Int64GetDatum(node_count),
-        Int64GetDatum(edge_count),
-        CStringGetTextDatum(file_path)
+    Oid   argtypes[9] = {
+        TEXTOID, TEXTOID, TEXTOID, TEXTOID,
+        INT8OID, INT8OID,
+        BOOLOID, BOOLOID,
+        TEXTOID
+    };
+    Datum args[9] = {
+        CStringGetTextDatum(name_str),        /* $1  name        */
+        CStringGetTextDatum(age_graph_str),   /* $2  age_graph   */
+        CStringGetTextDatum(node_query_str),  /* $3  node_query  */
+        CStringGetTextDatum(edge_query_str),  /* $4  edge_query  */
+        Int64GetDatum(node_count),            /* $5  node_count  */
+        Int64GetDatum(edge_count),            /* $6  edge_count  */
+        BoolGetDatum(directed),               /* $7  directed    */
+        BoolGetDatum(weighted),               /* $8  weighted    */
+        CStringGetTextDatum(file_path)        /* $9  file_path   */
     };
 
     int ret = SPI_execute_with_args(
         "INSERT INTO age_gds.graphs "
         "(name, age_graph, node_query, edge_query, node_count, edge_count, "
         " directed, weighted, file_path) "
-        "VALUES ($1, '', $2, $3, $4, $5, false, false, $6)",
-        6, argtypes, args, nullptr, false, 0);
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        9, argtypes, args, nullptr, false, 0);
 
     if (ret != SPI_OK_INSERT)
         ereport(ERROR,
@@ -192,9 +197,6 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
                  errmsg("graph_project catalog insert failed (SPI code %d)", ret)));
 
     SPI_finish();
-
-    /* Catalog row committed → no cleanup needed on success */
-    /* (g_pending_bin cleared by xact callback on commit) */
 
     PG_RETURN_VOID();
 }

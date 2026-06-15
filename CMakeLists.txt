@@ -24,6 +24,7 @@ add_library(age_gds MODULE
     src/age_gds.cpp
     src/catalog/serialization.cpp
     src/catalog/graph_project.cpp
+    src/bridge/age_loader.cpp
 )
 
 target_include_directories(age_gds PRIVATE

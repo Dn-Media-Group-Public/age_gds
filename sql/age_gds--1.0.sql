@@ -26,10 +26,16 @@ CREATE TABLE age_gds.graphs (
     projected_by  text
 );
 
-CREATE FUNCTION age_gds.graph_project(name text, node_query text, edge_query text)
-    RETURNS void
+CREATE FUNCTION age_gds.graph_project(
+    name        text,
+    age_graph   text,
+    node_query  text,
+    edge_query  text,
+    directed    boolean DEFAULT false,
+    weighted    boolean DEFAULT false
+) RETURNS void
     AS 'age_gds', 'age_gds_graph_project'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.graph_drop(name text)
     RETURNS void
