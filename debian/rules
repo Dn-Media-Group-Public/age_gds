@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+
+# Parallel build
+DEB_BUILD_OPTIONS ?=
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+else
+NUMJOBS = $(shell nproc)
+endif
+
+%:
+	dh $@
+
+# CMake configure.
+# pg_config paths (PG_PKGLIBDIR, PG_SHAREDIR) are absolute; CMake DESTDIR
+# will be prepended to them verbatim during install, giving the correct
+# staging tree without any --prefix gymnastics.
+override_dh_auto_configure:
+	[ -f third_party/networkit/CMakeLists.txt ] || \
+	    git submodule update --init --recursive
+	cmake -B build \
+	    -DCMAKE_BUILD_TYPE=Release \
+	    -DNETWORKIT_STATIC=ON \
+	    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+
+override_dh_auto_build:
+	cmake --build build -j$(NUMJOBS)
+
+# Install into the package staging dir.
+# pg_config absolute paths + DESTDIR → correct tree, e.g.:
+#   debian/postgresql-age-gds/usr/lib/postgresql/17/lib/age_gds.so
+#   debian/postgresql-age-gds/usr/share/postgresql/17/extension/age_gds.control
+#   debian/postgresql-age-gds/usr/share/postgresql/17/extension/age_gds--1.0.sql
+override_dh_auto_install:
+	DESTDIR=$(CURDIR)/debian/postgresql-age-gds cmake --install build
+
+# Tests require a live PostgreSQL cluster; skip during package build.
+override_dh_auto_test:

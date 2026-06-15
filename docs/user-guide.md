@@ -12,20 +12,52 @@
 
 ## Installation
 
-### 1. Initialize the NetworKit submodule
+### Option A — Debian package (recommended)
+
+Building the package requires the NetworKit submodule to be present.
+Initialize it once if you have not already done so:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### 2. Build
+Install build tools and build the package:
+
+```bash
+sudo apt-get install debhelper postgresql-server-dev-all cmake g++ libgomp-dev git
+
+dpkg-buildpackage -us -uc -b
+```
+
+This produces `../postgresql-age-gds_1.0_<arch>.deb`. Install it:
+
+```bash
+sudo dpkg -i ../postgresql-age-gds_1.0_*.deb
+# Fix any missing runtime deps if dpkg reports them:
+sudo apt-get install -f
+```
+
+Then enable the extension in your database — see
+[Create the extension](#5-create-the-extension-in-postgresql) below.
+
+---
+
+### Option B — Build and install from source
+
+#### 1. Initialize the NetworKit submodule
+
+```bash
+git submodule update --init --recursive
+```
+
+#### 2. Build
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-### 3. Install
+#### 3. Install
 
 ```bash
 sudo cmake --install build
@@ -34,7 +66,7 @@ sudo cmake --install build
 This copies `age_gds.so` to `pg_config --pkglibdir`, and `age_gds.control`
 and `age_gds--1.0.sql` to `pg_config --sharedir/extension`.
 
-### 4. Verify NetworKit linkage
+#### 4. Verify NetworKit linkage
 
 ```bash
 nm build/age_gds.so | grep -c '_ZN10NetworKit'
@@ -43,6 +75,8 @@ nm build/age_gds.so | grep -c '_ZN10NetworKit'
 
 If the count is 0, NetworKit is not linked into the binary. Do not proceed
 until this passes.
+
+---
 
 ### 5. Create the extension in PostgreSQL
 

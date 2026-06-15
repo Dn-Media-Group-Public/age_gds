@@ -1,0 +1,33 @@
+Source: age-gds
+Section: database
+Priority: optional
+Maintainer: age-gds maintainer <maintainer@example.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ postgresql-server-dev-all,
+ cmake (>= 3.16),
+ g++,
+ libgomp-dev,
+ git
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: postgresql-age-gds
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ postgresql,
+ libgomp1
+Description: Graph Data Science extension for Apache AGE on PostgreSQL
+ age_gds bridges Apache AGE (graph storage) with NetworKit (graph
+ data-science algorithms). It projects an AGE Cypher graph into a
+ NetworKit graph, runs algorithms, and streams results back to SQL.
+ .
+ Algorithms provided: PageRank, betweenness, closeness, degree,
+ eigenvector centrality, Louvain and Leiden community detection,
+ label propagation, BFS/Dijkstra shortest paths, link prediction
+ (Adamic-Adar, common neighbours, preferential attachment), node
+ similarity, and Node2Vec embeddings.
+ .
+ After installation, enable with: CREATE EXTENSION age_gds;

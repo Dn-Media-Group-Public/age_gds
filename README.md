@@ -43,6 +43,32 @@ SELECT age_gds.pageRank_write(graph_name => 'social', write_property => 'pageran
 
 ## Quick install
 
+### Debian package
+
+```bash
+# Build dependencies
+sudo apt-get install debhelper postgresql-server-dev-all cmake g++ libgomp-dev git
+
+# Initialize NetworKit submodule (once)
+git submodule update --init --recursive
+
+# Build and install the .deb
+dpkg-buildpackage -us -uc -b
+sudo dpkg -i ../postgresql-age-gds_1.0_*.deb
+```
+
+```sql
+-- Load in your database
+CREATE EXTENSION age;
+LOAD 'age';
+SET search_path = ag_catalog, "$user", public;
+
+CREATE EXTENSION age_gds;
+SELECT age_gds.version();   -- '0.1.0'
+```
+
+### Build from source
+
 ```bash
 # 1. Initialize the NetworKit submodule
 git submodule update --init --recursive
