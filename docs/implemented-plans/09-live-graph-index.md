@@ -361,3 +361,20 @@ Early-return `false` if `live = true` for the named graph.
 |---|---|
 | `docs/api.md` | Document `graph_index`, `graph_reindex`; note `live` column in `graph_list`; note `graph_is_stale` behaviour for live |
 | `docs/architecture.md` | Add section on live index: mmap format, trigger mechanism, version-counter invalidation, `edge_file_index` map |
+
+---
+
+## Implementation notes
+
+See also:
+- [docs/api.md](../api.md) — `graph_index`, `graph_reindex`, `graph_list` (live column), updated catalog tables
+- [docs/architecture.md](../architecture.md) — live-index execution path, AGE trigger bypass limitation
+
+**Key implementation divergences from plan:**
+- `on_new_label` trigger on `ag_catalog.ag_label` is installed but never fires in AGE 1.7.0.
+  AGE uses `simple_table_tuple_insert` for all internal mutations, bypassing PostgreSQL row-level
+  triggers for both vertex/edge tables AND `ag_label`. Labels created via Cypher after `graph_index`
+  require a drop+recreate of the index.
+- `graph_reindex` for live indices compacts existing binary files only; it does NOT reload from AGE.
+- Advisory locks (`pg_advisory_xact_lock_int8`, FNV-1a hash of index name) replace the
+  `LWLock` named-tranche approach; no `shared_preload_libraries` required.

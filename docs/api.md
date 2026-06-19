@@ -38,6 +38,82 @@ always non-NULL.
 
 ## 1. Projection management
 
+### `age_gds.graph_index`
+
+```sql
+age_gds.graph_index(
+    name      text,
+    age_graph text,
+    directed  boolean DEFAULT false,
+    weighted  boolean DEFAULT false
+) RETURNS void
+```
+
+Creates a **live index** projection. Execution:
+
+1. Reads all vertex rows from every vertex-label table in `age_graph`, building
+   a `NetworKit::Graph` keyed by AGE graphid.
+2. Reads all edge rows from every edge-label table, adding edges.
+3. Serializes the initial snapshot to two binary files:
+   `<age_gds.data_dir>/<name>.nodes` and `<age_gds.data_dir>/<name>.edges`.
+4. Installs AFTER INSERT and AFTER DELETE row-level triggers on every vertex and
+   edge label table that exists at creation time. Each trigger atomically appends
+   to the `.nodes`/`.edges` file and increments a version counter.
+5. Installs `age_gds_label_watch` AFTER INSERT trigger on `ag_catalog.ag_label`
+   (shared; one trigger covers all live indices).
+6. Records a row in `age_gds.graphs` with `live = true`.
+
+**AGE 1.7.0 trigger bypass limitation:** AGE uses `simple_table_tuple_insert`
+for all Cypher DML, bypassing PostgreSQL row-level triggers. This means:
+- Vertices and edges inserted via Cypher (`CREATE`) are **not** captured by the
+  live index.
+- New label tables created via Cypher are **not** detected by the
+  `age_gds_label_watch` trigger.
+
+Only mutations issued as direct SQL `INSERT`/`DELETE` on AGE label tables fire
+the live-index triggers.
+
+To incorporate Cypher mutations into the live index, drop and recreate it:
+
+```sql
+SELECT age_gds.graph_drop('my_index');
+SELECT age_gds.graph_index(name => 'my_index', age_graph => 'my_graph');
+```
+
+**Errors:**
+- `ERRCODE_UNDEFINED_OBJECT` — `age_graph` does not exist.
+- `ERRCODE_INVALID_PARAMETER_VALUE` — `name` already exists with a different
+  mode (live vs. snapshot).
+- Duplicate `name` raises a unique-constraint violation from `age_gds.graphs`.
+
+See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.md)
+
+---
+
+### `age_gds.graph_reindex`
+
+```sql
+age_gds.graph_reindex(name text) RETURNS void
+```
+
+Behaviour depends on the projection mode:
+
+- **Live index**: compacts the `.nodes` and `.edges` binary files by rewriting
+  them without tombstoned (deleted) entries. Invalidates the session cache so
+  the next algorithm call re-reads the compacted files. Does **not** reload
+  data from AGE; only removes stale entries from the existing live-index files.
+
+- **Snapshot**: drops and rebuilds the projection from the stored Cypher queries
+  (equivalent to `graph_drop` + `graph_project`).
+
+**Errors:**
+- `ERRCODE_UNDEFINED_OBJECT` — projection `name` does not exist.
+- `ERRCODE_INTERNAL_ERROR` — file I/O failure.
+
+See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.md)
+
+---
+
 ### `age_gds.graph_project`
 
 ```sql
@@ -79,8 +155,12 @@ is deleted by a registered `XactCallback`.
 age_gds.graph_drop(name text) RETURNS void
 ```
 
-Drops the projection: deletes the catalog row, unlinks the `.bin` file, and
-evicts the entry from the calling backend's session cache.
+Drops the projection:
+- For **snapshot** projections: deletes the catalog row, unlinks the `.bin`
+  file, and evicts the entry from the calling backend's session cache.
+- For **live index** projections: additionally drops all data triggers installed
+  on AGE label tables for this index (entries in `age_gds.index_triggers` are
+  cascade-deleted), and unlinks the `.nodes` and `.edges` files.
 
 **Errors:**
 - `ERRCODE_UNDEFINED_OBJECT` — projection `name` does not exist.
@@ -97,6 +177,7 @@ age_gds.graph_list() RETURNS TABLE(
     edge_count    bigint,
     directed      boolean,
     weighted      boolean,
+    live          boolean,
     file_path     text,
     created_at    timestamptz,
     "memoryUsage" bigint
@@ -104,7 +185,8 @@ age_gds.graph_list() RETURNS TABLE(
 ```
 
 Returns all rows from `age_gds.graphs`, ordered by `created_at`. The
-`memoryUsage` column is a derived estimate: `node_count * 8 + edge_count * 20`
+`live` column is `true` for live-index projections and `false` for snapshots.
+The `memoryUsage` column is a derived estimate: `node_count * 8 + edge_count * 20`
 bytes (approximate in-memory cost of the deserialized graph).
 
 ---
@@ -129,6 +211,9 @@ age_gds.graph_is_stale(name text) RETURNS boolean
 Returns `true` if the underlying AGE graph has been modified since the last
 `ANALYZE` run. Internally queries `pg_stat_user_tables` for the AGE graph
 schema's `_ag_label_vertex` table and checks `n_mod_since_analyze > 0`.
+
+Always returns `false` for **live index** projections (they are never stale
+by definition — mutations are captured immediately via triggers).
 
 Returns `false` if no statistics row exists (cannot determine staleness).
 STRICT (NULL input returns NULL).
@@ -958,29 +1043,52 @@ property named by `write_property`.
 
 ---
 
-## Catalog table
+## Catalog tables
 
 ### `age_gds.graphs`
 
 ```sql
 CREATE TABLE age_gds.graphs (
-    name          text        PRIMARY KEY,
-    age_graph     text        NOT NULL DEFAULT '',
-    node_query    text,
-    edge_query    text,
-    node_count    bigint,
-    edge_count    bigint,
-    directed      boolean     NOT NULL DEFAULT false,
-    weighted      boolean     NOT NULL DEFAULT false,
-    file_path     text        NOT NULL,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    projected_by  text
+    name             text        PRIMARY KEY,
+    age_graph        text        NOT NULL DEFAULT '',
+    node_query       text,
+    edge_query       text,
+    node_count       bigint,
+    edge_count       bigint,
+    directed         boolean     NOT NULL DEFAULT false,
+    weighted         boolean     NOT NULL DEFAULT false,
+    live             boolean     NOT NULL DEFAULT false,
+    file_path        text,           -- snapshot .bin path (NULL for live)
+    nodes_file_path  text,           -- live index .nodes path (NULL for snapshot)
+    edges_file_path  text,           -- live index .edges path (NULL for snapshot)
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    projected_by     text
 );
 ```
 
-The catalog table. `projected_by` is populated by `graph_project` but not
-exposed through `graph_list()`; it stores the role that created the projection.
-Direct reads are supported but `graph_list()` is the recommended interface.
+The catalog table. `projected_by` stores the role that created the projection
+but is not exposed through `graph_list()`. `live = true` indicates a live-index
+projection; `false` indicates a snapshot. Direct reads are supported but
+`graph_list()` is the recommended interface.
+
+---
+
+### `age_gds.index_triggers`
+
+```sql
+CREATE TABLE age_gds.index_triggers (
+    graph_name   text    NOT NULL REFERENCES age_gds.graphs(name) ON DELETE CASCADE,
+    schema_name  text    NOT NULL,
+    table_name   text    NOT NULL,
+    trigger_name text    NOT NULL,
+    PRIMARY KEY (graph_name, schema_name, table_name)
+);
+```
+
+Tracks which triggers have been installed on AGE label tables for live-index
+projections. Rows are cascade-deleted when the corresponding `graphs` entry is
+dropped. `graph_drop` reads this table to remove the triggers before deleting
+the `graphs` row.
 
 ---
 

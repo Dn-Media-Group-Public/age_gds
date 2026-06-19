@@ -36,15 +36,20 @@ age_gds/
 │   │   ├── serialization.cpp   gds_serialize() / gds_deserialize()
 │   │   ├── graph_project.cpp   graph_project, graph_drop, graph_list, graph_exists,
 │   │   │                       graph_is_stale SQL entry points
-│   │   ├── session_cache.h     ProjectedGraph, GraphHandle, cache API declarations
-│   │   └── session_cache.cpp   Per-backend LRU cache, get_or_load_graph(), cache SQL fns
+│   │   ├── index_storage.h     Live-index .nodes/.edges file layout + declarations
+│   │   ├── index_storage.cpp   Live-index file I/O: init, append, compact
+│   │   ├── graph_index.cpp     graph_index, graph_reindex, vertex/edge triggers,
+│   │   │                       on_new_label (ag_label watch), install_label_trigger
+│   │   ├── session_cache.h     ProjectedGraph (incl. live fields), GraphHandle, cache API
+│   │   └── session_cache.cpp   Per-backend LRU cache; live-index version-counter check
 │   ├── util/
 │   │   ├── config_parser.h     PageRankConfig struct + parse_pagerank_config() declaration
 │   │   ├── config_parser.cpp   JSONB + named-param config parsing for PageRank
 │   │   ├── srf_helper.h        SRFState + srf_begin/emit/end declarations
 │   │   ├── srf_helper.cpp      Set-returning function boilerplate (tuplestore)
 │   │   ├── writeback.h         writeback_scores() + lookup_age_graph() declarations
-│   │   └── writeback.cpp       Cypher SET write-back, pageRank_write, betweenness_write
+│   │   ├── writeback.cpp       Cypher SET write-back, pageRank_write, betweenness_write
+│   │   └── pair_hash.h         PairHash for std::pair<nk::node, nk::node>
 │   └── algorithms/
 │       ├── centrality.cpp      pageRank, betweenness, closeness, harmonic, degree,
 │       │                       eigenvector, HITS, articleRank, articulationPoints
@@ -104,6 +109,53 @@ undesirable.
 
 `graph_name` and `age_graph` are mutually exclusive. Passing both raises
 `ERRCODE_INVALID_PARAMETER_VALUE`. Passing neither also raises an error.
+
+### Live index (trigger-maintained)
+
+```
+graph_index('name', 'age_graph')
+  → age_load_all_labels()     (scan all vertex/edge label tables via ag_label)
+  → NetworKit::Graph built    (no Cypher; direct table scans)
+  → index_storage_init()      (write .nodes + .edges files, set version counter)
+  → install_label_trigger()   (AFTER INSERT/DELETE trigger on each label table)
+  → INSERT age_gds.graphs (live=true, nodes_file_path, edges_file_path)
+  → INSERT age_gds.index_triggers (one row per installed trigger)
+
+-- vertex inserted via direct SQL on test_graph."Person":
+INSERT trigger fires → index_storage_append_node() → version_counter++
+
+-- algorithm called:
+pageRank_stream(graph_name => 'name')
+  → session_cache_get():
+      compare stored version_counter vs catalog
+      if changed: index_storage_load() → rebuild ProjectedGraph from .nodes/.edges
+  → NetworKit::PageRank.run()
+  → SRF rows
+```
+
+**Version counter**: a `uint64_t` appended to the `.nodes` file header.
+Every trigger increment writes it atomically via `pwrite`. `session_cache_get`
+reads it via `pread` without a lock (worst case: spurious reload).
+
+**Advisory locks**: write operations use `pg_advisory_xact_lock_int8` (FNV-1a
+hash of index name) to serialize concurrent writes to the index files. Locks
+are transaction-scoped (auto-released at commit/rollback). No
+`shared_preload_libraries` required.
+
+**AGE 1.7.0 trigger bypass**: AGE uses `simple_table_tuple_insert` (an
+internal catalog-level heap insertion that bypasses the normal executor trigger
+path) for ALL Cypher DML — both vertex/edge inserts and ag_label inserts. This
+means:
+- Vertices and edges inserted via `CREATE` in Cypher never fire the live-index
+  triggers.
+- New label tables created via Cypher never fire `age_gds_label_watch`.
+- Only direct SQL `INSERT`/`DELETE` on AGE label tables is captured.
+
+To incorporate Cypher mutations: `graph_drop` + `graph_index` (full rebuild).
+`graph_reindex` for live indices only compacts existing files; it does not
+reload from AGE.
+
+See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.md)
 
 ---
 

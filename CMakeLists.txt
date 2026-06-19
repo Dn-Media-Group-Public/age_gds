@@ -25,6 +25,8 @@ add_library(age_gds MODULE
     src/catalog/serialization.cpp
     src/catalog/graph_project.cpp
     src/catalog/session_cache.cpp
+    src/catalog/index_storage.cpp
+    src/catalog/graph_index.cpp
     src/bridge/age_loader.cpp
     src/util/config_parser.cpp
     src/util/srf_helper.cpp

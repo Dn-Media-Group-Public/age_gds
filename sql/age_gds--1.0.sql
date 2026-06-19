@@ -13,18 +13,37 @@ CREATE FUNCTION age_gds.version() RETURNS text
 -- -------------------------------------------------------------------------
 
 CREATE TABLE age_gds.graphs (
-    name          text        PRIMARY KEY,
-    age_graph     text        NOT NULL DEFAULT '',
-    node_query    text,
-    edge_query    text,
-    node_count    bigint,
-    edge_count    bigint,
-    directed      boolean     NOT NULL DEFAULT false,
-    weighted      boolean     NOT NULL DEFAULT false,
-    file_path     text        NOT NULL,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    projected_by  text
+    name             text        PRIMARY KEY,
+    age_graph        text        NOT NULL DEFAULT '',
+    node_query       text,
+    edge_query       text,
+    node_count       bigint,
+    edge_count       bigint,
+    directed         boolean     NOT NULL DEFAULT false,
+    weighted         boolean     NOT NULL DEFAULT false,
+    file_path        text,                          -- snapshot .bin file (NULL for live)
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    projected_by     text,
+    live             boolean     NOT NULL DEFAULT false,
+    nodes_file_path  text,                          -- live index .nodes mmap file
+    edges_file_path  text                           -- live index .edges mmap file
 );
+
+-- -------------------------------------------------------------------------
+-- Live index trigger catalog
+-- -------------------------------------------------------------------------
+
+CREATE TABLE age_gds.index_triggers (
+    graph_name   text  NOT NULL REFERENCES age_gds.graphs(name) ON DELETE CASCADE,
+    trigger_name text  NOT NULL,
+    table_schema text  NOT NULL,
+    table_name   text  NOT NULL,
+    PRIMARY KEY (graph_name, trigger_name)
+);
+
+-- -------------------------------------------------------------------------
+-- Snapshot projection functions
+-- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.graph_project(
     name        text,
@@ -36,6 +55,23 @@ CREATE FUNCTION age_gds.graph_project(
 ) RETURNS void
     AS 'age_gds', 'age_gds_graph_project'
     LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Live index functions
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.graph_index(
+    name        text,
+    age_graph   text,
+    directed    boolean DEFAULT false,
+    weighted    boolean DEFAULT false
+) RETURNS void
+    AS 'age_gds', 'age_gds_graph_index'
+    LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- Shared catalog management
+-- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.graph_drop(name text)
     RETURNS void
@@ -52,7 +88,8 @@ CREATE FUNCTION age_gds.graph_list()
         weighted      boolean,
         file_path     text,
         created_at    timestamptz,
-        "memoryUsage" bigint
+        "memoryUsage" bigint,
+        live          boolean
     )
     AS 'age_gds', 'age_gds_graph_list'
     LANGUAGE C;
@@ -60,6 +97,11 @@ CREATE FUNCTION age_gds.graph_list()
 CREATE FUNCTION age_gds.graph_exists(name text)
     RETURNS boolean
     AS 'age_gds', 'age_gds_graph_exists'
+    LANGUAGE C STRICT;
+
+CREATE FUNCTION age_gds.graph_reindex(name text)
+    RETURNS void
+    AS 'age_gds', 'age_gds_graph_reindex'
     LANGUAGE C STRICT;
 
 -- -------------------------------------------------------------------------
@@ -75,6 +117,31 @@ CREATE FUNCTION age_gds.cache_load(graph_name text)
     RETURNS void
     AS 'age_gds', 'age_gds_cache_load'
     LANGUAGE C STRICT;
+
+-- -------------------------------------------------------------------------
+-- Internal trigger functions (live index maintenance)
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.index_vertex_trigger()
+    RETURNS trigger
+    AS 'age_gds', 'age_gds_index_vertex_trigger'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.index_edge_trigger()
+    RETURNS trigger
+    AS 'age_gds', 'age_gds_index_edge_trigger'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.on_new_label()
+    RETURNS trigger
+    AS 'age_gds', 'age_gds_on_new_label'
+    LANGUAGE C;
+
+-- Watch for new AGE labels so live indices auto-extend
+CREATE TRIGGER age_gds_label_watch
+    AFTER INSERT ON ag_catalog.ag_label
+    FOR EACH ROW
+    EXECUTE FUNCTION age_gds.on_new_label();
 
 -- -------------------------------------------------------------------------
 -- Centrality algorithms

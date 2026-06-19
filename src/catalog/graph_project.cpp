@@ -11,6 +11,7 @@
 
 #include <string>
 #include <stdexcept>
+#include <vector>
 
 extern "C" {
 #include "postgres.h"
@@ -209,41 +210,120 @@ Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
 {
     char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
 
+    /* ---- Step 1: look up catalog row ---- */
+    char  file_path_buf[MAXPGPATH]  = {0};
+    char  nodes_path_buf[MAXPGPATH] = {0};
+    char  edges_path_buf[MAXPGPATH] = {0};
+    bool  is_live                   = false;
+
     SPI_connect();
+    {
+        Oid   argtypes[1] = {TEXTOID};
+        Datum args[1]     = {CStringGetTextDatum(name_str)};
+        int   ret         = SPI_execute_with_args(
+            "SELECT live, file_path, nodes_file_path, edges_file_path "
+            "FROM age_gds.graphs WHERE name = $1",
+            1, argtypes, args, nullptr, true, 1);
 
-    Oid   argtypes[1] = {TEXTOID};
-    Datum args[1]     = {CStringGetTextDatum(name_str)};
+        if (ret != SPI_OK_SELECT) {
+            SPI_finish();
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_drop: catalog lookup failed (SPI %d)", ret)));
+        }
+        if (SPI_processed == 0) {
+            SPI_finish();
+            ereport(ERROR,
+                    (errcode(ERRCODE_UNDEFINED_OBJECT),
+                     errmsg("graph \"%s\" does not exist", name_str)));
+        }
 
-    int ret = SPI_execute_with_args(
-        "DELETE FROM age_gds.graphs WHERE name = $1 RETURNING file_path",
-        1, argtypes, args, nullptr, false, 0);
+        bool      isnull;
+        TupleDesc td = SPI_tuptable->tupdesc;
+        HeapTuple t  = SPI_tuptable->vals[0];
 
-    if (ret != SPI_OK_DELETE_RETURNING)
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("graph_drop failed (SPI code %d)", ret)));
+        Datum d1 = SPI_getbinval(t, td, 1, &isnull);
+        if (!isnull) is_live = DatumGetBool(d1);
 
-    if (SPI_processed == 0) {
-        SPI_finish();
-        ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("graph \"%s\" does not exist", name_str)));
+        Datum d2 = SPI_getbinval(t, td, 2, &isnull);
+        if (!isnull) strlcpy(file_path_buf,  TextDatumGetCString(d2),
+                             sizeof(file_path_buf));
+
+        Datum d3 = SPI_getbinval(t, td, 3, &isnull);
+        if (!isnull) strlcpy(nodes_path_buf, TextDatumGetCString(d3),
+                             sizeof(nodes_path_buf));
+
+        Datum d4 = SPI_getbinval(t, td, 4, &isnull);
+        if (!isnull) strlcpy(edges_path_buf, TextDatumGetCString(d4),
+                             sizeof(edges_path_buf));
     }
 
-    /* Extract file_path before SPI_finish invalidates memory */
-    bool  isnull;
-    Datum fp_datum = SPI_getbinval(SPI_tuptable->vals[0],
-                                   SPI_tuptable->tupdesc, 1, &isnull);
-    char  file_path[MAXPGPATH] = {0};
-    if (!isnull)
-        strlcpy(file_path, TextDatumGetCString(fp_datum), MAXPGPATH);
+    if (is_live) {
+        /* ---- Step 2a (live): drop PostgreSQL triggers recorded in index_triggers ---- */
+        struct TrigInfo { std::string tname, tschema, ttable; };
+        std::vector<TrigInfo> trigs;
 
+        {
+            Oid   argtypes[1] = {TEXTOID};
+            Datum args[1]     = {CStringGetTextDatum(name_str)};
+            int   ret         = SPI_execute_with_args(
+                "SELECT trigger_name, table_schema, table_name "
+                "FROM age_gds.index_triggers WHERE graph_name = $1",
+                1, argtypes, args, nullptr, true, 0);
+
+            if (ret == SPI_OK_SELECT) {
+                for (uint64_t i = 0; i < SPI_processed; i++) {
+                    bool      isnull;
+                    TupleDesc td = SPI_tuptable->tupdesc;
+                    HeapTuple t  = SPI_tuptable->vals[i];
+
+                    auto gtext = [&](int col) -> std::string {
+                        Datum d = SPI_getbinval(t, td, col, &isnull);
+                        return isnull ? std::string{} : std::string(TextDatumGetCString(d));
+                    };
+                    trigs.push_back({gtext(1), gtext(2), gtext(3)});
+                }
+            }
+        }
+
+        for (auto &tr : trigs) {
+            if (tr.tname.empty()) continue;
+            /* Escape identifiers */
+            char sql[512];
+            snprintf(sql, sizeof(sql),
+                "DROP TRIGGER IF EXISTS \"%s\" ON \"%s\".\"%s\"",
+                tr.tname.c_str(), tr.tschema.c_str(), tr.ttable.c_str());
+            SPI_execute(sql, false, 0);
+            /* Ignore errors (table might have been dropped already) */
+        }
+    }
+
+    /* ---- Step 3: delete catalog row (ON DELETE CASCADE handles index_triggers) ---- */
+    {
+        Oid   argtypes[1] = {TEXTOID};
+        Datum args[1]     = {CStringGetTextDatum(name_str)};
+        int   ret         = SPI_execute_with_args(
+            "DELETE FROM age_gds.graphs WHERE name = $1",
+            1, argtypes, args, nullptr, false, 0);
+
+        if (ret != SPI_OK_DELETE) {
+            SPI_finish();
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_drop: catalog delete failed (SPI %d)", ret)));
+        }
+    }
     SPI_finish();
 
-    if (file_path[0] != '\0')
-        (void) unlink(file_path);
+    /* ---- Step 4: remove files ---- */
+    if (is_live) {
+        if (nodes_path_buf[0] != '\0') (void) unlink(nodes_path_buf);
+        if (edges_path_buf[0] != '\0') (void) unlink(edges_path_buf);
+    } else {
+        if (file_path_buf[0] != '\0') (void) unlink(file_path_buf);
+    }
 
-    /* Evict from session cache if loaded */
+    /* ---- Step 5: evict from session cache ---- */
     session_cache_invalidate(name_str);
 
     PG_RETURN_VOID();
@@ -263,9 +343,11 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
 
     SPI_connect();
 
+    /* Columns: name(1), age_graph(2), node_count(3), edge_count(4),
+     *          directed(5), weighted(6), file_path(7), created_at(8), live(9) */
     int ret = SPI_execute(
         "SELECT name, age_graph, node_count, edge_count, "
-        "       directed, weighted, file_path, created_at "
+        "       directed, weighted, file_path, created_at, live "
         "FROM age_gds.graphs "
         "ORDER BY created_at",
         true, 0);
@@ -279,10 +361,15 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
         HeapTuple spi_tup  = SPI_tuptable->vals[i];
         TupleDesc spi_desc = SPI_tuptable->tupdesc;
 
-        Datum values[9];
-        bool  isnull[9];
+        /* Return TABLE has 10 columns:
+         *  1-8  from SPI (name..created_at)
+         *  9    computed memoryUsage
+         * 10    live (SPI col 9) */
+        Datum values[10];
+        bool  isnull[10];
         bool  is_null;
 
+        /* Copy first 8 SPI columns */
         for (int j = 0; j < 8; j++) {
             values[j] = SPI_getbinval(spi_tup, spi_desc, j + 1, &is_null);
             isnull[j] = is_null;
@@ -295,6 +382,10 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
         int64_t ec = isnull[3] ? 0 : DatumGetInt64(values[3]);
         values[8] = Int64GetDatum(nc * 8 + ec * 20);
         isnull[8] = false;
+
+        /* live = SPI col 9 */
+        values[9] = SPI_getbinval(spi_tup, spi_desc, 9, &is_null);
+        isnull[9] = is_null;
 
         tuplestore_putvalues(tupstore, tupdesc, values, isnull);
     }
@@ -337,6 +428,7 @@ Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
 {
     char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char  age_graph_buf[256] = {0};
+    bool  is_live            = false;
 
     /* === SPI session 1: catalog lookup === */
     SPI_connect();
@@ -346,7 +438,7 @@ Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
         Datum args[1]     = {CStringGetTextDatum(name_str)};
 
         int ret = SPI_execute_with_args(
-            "SELECT age_graph FROM age_gds.graphs WHERE name = $1",
+            "SELECT age_graph, live FROM age_gds.graphs WHERE name = $1",
             1, argtypes, args, nullptr, true, 1);
 
         if (ret != SPI_OK_SELECT) {
@@ -363,21 +455,24 @@ Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
                      errmsg("graph \"%s\" does not exist", name_str)));
         }
 
-        bool  isnull = false;
-        Datum d      = SPI_getbinval(SPI_tuptable->vals[0],
-                                      SPI_tuptable->tupdesc, 1, &isnull);
-        if (!isnull) {
-            char *ag = TextDatumGetCString(d);
-            strlcpy(age_graph_buf, ag, sizeof(age_graph_buf));
-        }
+        bool      isnull;
+        TupleDesc td = SPI_tuptable->tupdesc;
+        HeapTuple t  = SPI_tuptable->vals[0];
+
+        Datum d1 = SPI_getbinval(t, td, 1, &isnull);
+        if (!isnull) strlcpy(age_graph_buf, TextDatumGetCString(d1), sizeof(age_graph_buf));
+
+        Datum d2 = SPI_getbinval(t, td, 2, &isnull);
+        if (!isnull) is_live = DatumGetBool(d2);
     }
 
     SPI_finish();
 
+    /* Live indices are never stale */
+    if (is_live)
+        PG_RETURN_BOOL(false);
+
     /* === SPI session 2: staleness check via pg_stat_user_tables === */
-    /* If n_mod_since_analyze > 0, the AGE graph has been modified since
-     * the last analyze — treat as potentially stale.
-     * If no stat row exists yet, return false (cannot determine). */
     bool stale = false;
 
     SPI_connect();
@@ -395,13 +490,12 @@ Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
             1, argtypes, args, nullptr, true, 1);
 
         if (ret == SPI_OK_SELECT && SPI_processed > 0) {
-            bool  isnull = false;
-            Datum d      = SPI_getbinval(SPI_tuptable->vals[0],
-                                          SPI_tuptable->tupdesc, 1, &isnull);
+            bool  isnull;
+            Datum d = SPI_getbinval(SPI_tuptable->vals[0],
+                                     SPI_tuptable->tupdesc, 1, &isnull);
             if (!isnull)
                 stale = DatumGetBool(d);
         }
-        /* else: no stat row → return false (not stale / unknown) */
     }
 
     SPI_finish();

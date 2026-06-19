@@ -3,6 +3,7 @@ extern "C" {
 #include "fmgr.h"
 #include "utils/guc.h"
 #include "utils/builtins.h"
+#include "miscadmin.h"
 
 PG_MODULE_MAGIC;
 }
@@ -14,13 +15,14 @@ PG_MODULE_MAGIC;
 static int  session_cache_mb = 512;
 static char *data_dir = NULL;
 
-/* Forward declaration — defined in catalog/session_cache.cpp */
+/* Forward declarations */
 void session_cache_register_exit_hook();
 
 extern "C" void _PG_init(void);
 
 void _PG_init(void)
 {
+
     DefineCustomIntVariable(
         "age_gds.session_cache_mb",
         "Per-session nk::Graph cache size limit (MB)",
@@ -56,5 +58,12 @@ Datum age_gds_version(PG_FUNCTION_ARGS)
 {
     PG_RETURN_TEXT_P(cstring_to_text("0.1.0"));
 }
+
+/* Live index entry points — implemented in catalog/graph_index.cpp */
+PG_FUNCTION_INFO_V1(age_gds_graph_index);
+PG_FUNCTION_INFO_V1(age_gds_graph_reindex);
+PG_FUNCTION_INFO_V1(age_gds_index_vertex_trigger);
+PG_FUNCTION_INFO_V1(age_gds_index_edge_trigger);
+PG_FUNCTION_INFO_V1(age_gds_on_new_label);
 
 } /* extern "C" */
