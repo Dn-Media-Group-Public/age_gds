@@ -101,4 +101,4 @@ SELECT count(*) FROM age_gds.pageRank_stream(graph_name => 'people');
 -- expected: 4
 
 SELECT age_gds.graph_drop('people');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

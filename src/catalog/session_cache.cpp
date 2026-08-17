@@ -65,7 +65,8 @@ static void evict_lru()
 
 static void load_live_into_cache(const std::string &name,
                                  const char *nodes_path,
-                                 const char *edges_path)
+                                 const char *edges_path,
+                                 bool        live)
 {
     IndexDeserializedGraph idg;
     try {
@@ -102,8 +103,9 @@ static void load_live_into_cache(const std::string &name,
     pg.weighted         = idg.weighted;
     pg.approx_bytes     = approx;
     pg.last_used        = std::chrono::steady_clock::now();
-    pg.live             = true;
-    pg.index_version    = idg.version_counter;
+    pg.live             = live;
+    pg.incremental      = true;
+    pg.content_version  = idg.version_counter;
     pg.nodes_file_path  = nodes_path;
     pg.edges_file_path  = edges_path;
     pg.edge_file_index  = std::move(idg.edge_file_index);
@@ -125,9 +127,10 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
         if (it != g_cache.end()) {
             ProjectedGraph &pg = it->second;
 
-            if (pg.live) {
-                /* For live indices: check version_counter (no cross-backend
-                 * lock needed — worst case is a spurious reload). */
+            if (pg.incremental) {
+                /* Slot/tombstone storage (live index or graph_project(incremental
+                 * := true)): check version_counter (no cross-backend lock
+                 * needed — worst case is a spurious reload). */
                 uint64_t current_version = 0;
                 try {
                     current_version = index_storage_read_version(
@@ -139,7 +142,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                                     pg.nodes_file_path.c_str())));
                 }
 
-                if (current_version == pg.index_version) {
+                if (current_version == pg.content_version) {
                     /* Up to date */
                     pg.last_used = std::chrono::steady_clock::now();
                     return pg;
@@ -148,12 +151,64 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                 /* Version mismatch: reload from files */
                 std::string nfp = pg.nodes_file_path;
                 std::string efp = pg.edges_file_path;
-                load_live_into_cache(name, nfp.c_str(), efp.c_str());
+                bool        was_live = pg.live;
+                load_live_into_cache(name, nfp.c_str(), efp.c_str(), was_live);
                 return g_cache.at(name);
             } else {
-                /* Snapshot: return as-is */
-                pg.last_used = std::chrono::steady_clock::now();
-                return pg;
+                /* Flat storage: check content_version in the .bin header
+                 * (cheap pread, no full deserialize). */
+                uint64_t current_version = 0;
+                try {
+                    current_version = gds_read_version(pg.file_path.c_str());
+                } catch (...) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("session_cache: failed to read version from \"%s\"",
+                                    pg.file_path.c_str())));
+                }
+
+                if (current_version == pg.content_version) {
+                    pg.last_used = std::chrono::steady_clock::now();
+                    return pg;
+                }
+
+                /* Version mismatch: reload from file */
+                std::string fp = pg.file_path;
+
+                DeserializedGraph dg;
+                try {
+                    dg = gds_deserialize(fp.c_str());
+                } catch (const std::exception &ex) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("session_cache: reload deserialize failed: %s",
+                                    ex.what())));
+                }
+
+                uint64_t nc     = dg.graph.numberOfNodes();
+                uint64_t ec     = dg.graph.numberOfEdges();
+                size_t   approx = (size_t)(nc * 8ULL + ec * 20ULL);
+
+                g_total_bytes -= pg.approx_bytes;
+
+                ProjectedGraph new_pg;
+                new_pg.name            = name;
+                new_pg.graph           = std::move(dg.graph);
+                new_pg.id_map          = std::move(dg.id_map);
+                new_pg.directed        = dg.directed;
+                new_pg.weighted        = dg.weighted;
+                new_pg.approx_bytes    = approx;
+                new_pg.last_used       = std::chrono::steady_clock::now();
+                new_pg.live            = false;
+                new_pg.incremental     = false;
+                new_pg.content_version = dg.content_version;
+                new_pg.file_path       = fp;
+
+                g_cache.erase(it);
+                auto [ins_it, ok] = g_cache.emplace(name, std::move(new_pg));
+                (void) ok;
+                g_total_bytes += ins_it->second.approx_bytes;
+                return ins_it->second;
             }
         }
     }
@@ -163,6 +218,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
     char     nodes_file_path_buf[4096] = {0};
     char     edges_file_path_buf[4096] = {0};
     bool     is_live                   = false;
+    bool     is_incremental            = false;
 
     SPI_connect();
 
@@ -170,7 +226,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
     Datum args[1]     = {CStringGetTextDatum(graph_name)};
 
     int ret = SPI_execute_with_args(
-        "SELECT file_path, live, nodes_file_path, edges_file_path "
+        "SELECT file_path, live, nodes_file_path, edges_file_path, incremental "
         "FROM age_gds.graphs WHERE name = $1",
         1, argtypes, args, nullptr, true, 1);
 
@@ -215,23 +271,29 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
         if (!isnull)
             strlcpy(edges_file_path_buf, TextDatumGetCString(d4),
                     sizeof(edges_file_path_buf));
+
+        /* col 5: incremental */
+        Datum d5 = SPI_getbinval(SPI_tuptable->vals[0],
+                                  SPI_tuptable->tupdesc, 5, &isnull);
+        if (!isnull)
+            is_incremental = DatumGetBool(d5);
     }
 
     SPI_finish();
 
-    /* ---- Live index path ---- */
-    if (is_live) {
+    /* ---- Incremental (slot/tombstone) storage path ---- */
+    if (is_incremental) {
         if (nodes_file_path_buf[0] == '\0' || edges_file_path_buf[0] == '\0')
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("live index \"%s\" has no file paths in catalog",
+                     errmsg("incremental graph \"%s\" has no file paths in catalog",
                             graph_name)));
 
-        load_live_into_cache(name, nodes_file_path_buf, edges_file_path_buf);
+        load_live_into_cache(name, nodes_file_path_buf, edges_file_path_buf, is_live);
         return g_cache.at(name);
     }
 
-    /* ---- Snapshot path ---- */
+    /* ---- Flat storage path ---- */
     if (file_path_buf[0] == '\0')
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
@@ -258,14 +320,17 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
         evict_lru();
 
     ProjectedGraph pg;
-    pg.name         = name;
-    pg.graph        = std::move(dg.graph);
-    pg.id_map       = std::move(dg.id_map);
-    pg.directed     = dg.directed;
-    pg.weighted     = dg.weighted;
-    pg.approx_bytes = approx;
-    pg.last_used    = std::chrono::steady_clock::now();
-    pg.live         = false;
+    pg.name            = name;
+    pg.graph           = std::move(dg.graph);
+    pg.id_map          = std::move(dg.id_map);
+    pg.directed        = dg.directed;
+    pg.weighted        = dg.weighted;
+    pg.approx_bytes    = approx;
+    pg.last_used       = std::chrono::steady_clock::now();
+    pg.live            = false;
+    pg.incremental     = false;
+    pg.content_version = dg.content_version;
+    pg.file_path       = file_path_buf;
 
     auto [ins_it, ok] = g_cache.emplace(name, std::move(pg));
     (void) ok;

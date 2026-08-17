@@ -154,7 +154,7 @@ ORDER BY score DESC;
 ### Inspect projection metadata
 
 ```sql
-SELECT name, node_count, edge_count, "memoryUsage"
+SELECT name, node_count, edge_count, "memoryUsage", live, incremental
 FROM age_gds.graph_list();
 ```
 
@@ -493,18 +493,63 @@ Returns `true` if `pg_stat_user_tables.n_mod_since_analyze > 0` for the AGE
 graph's `_ag_label_vertex` table. Returns `false` if no statistics are
 available.
 
-To refresh a stale projection, drop and re-project:
+To refresh a stale projection, reindex it in place — cheaper than dropping and
+re-creating since the catalog row, name, and stored queries are preserved:
 
 ```sql
-SELECT age_gds.graph_drop('social_proj');
-SELECT age_gds.graph_project(
-    name       => 'social_proj',
-    age_graph  => 'social',
-    node_query => $$MATCH (n:Person) RETURN id(n) AS id$$,
-    edge_query => $$MATCH (a:Person)-[r:KNOWS]->(b:Person)
-                   RETURN id(a) AS src, id(b) AS dst, 1.0 AS weight$$
-);
+SELECT age_gds.graph_reindex('social_proj');
 ```
+
+By default this fully re-runs `node_query`/`edge_query` and rewrites the
+projection's file(s). Every backend's session cache — including ones that
+never call `graph_reindex` themselves — notices the change automatically on
+its next use of `social_proj` (see [Session cache behavior](#session-cache-behavior)
+below), so there is no need to coordinate `cache_load`/invalidation across
+connections.
+
+If the projection was created with `incremental := true` (see
+[Incremental projections](#incremental-projections-cheaper-reindex) below),
+`graph_reindex` instead diffs the query results against the stored graph and
+applies only the changes, which is much cheaper for large graphs with small
+deltas. Pass `force := true` to force a full rebuild instead of a diff.
+
+See also: [Plan 10: Cross-Backend Cache Invalidation](implemented-plans/10-snapshot-version-cache.md)
+
+---
+
+## Incremental projections (cheaper reindex)
+
+By default, `graph_project` stores the projection as a flat file that
+`graph_reindex` can only fully rebuild. Pass `incremental := true` to instead
+store it in the same slot/tombstone format live indices use — without
+installing any AGE triggers — so `graph_reindex` can diff-and-apply instead of
+rebuilding from scratch:
+
+```sql
+SELECT age_gds.graph_project(
+    name        => 'social_proj',
+    age_graph   => 'social',
+    node_query  => $$MATCH (n:Person) RETURN id(n) AS id$$,
+    edge_query  => $$MATCH (a:Person)-[r:KNOWS]->(b:Person)
+                   RETURN id(a) AS src, id(b) AS dst, 1.0 AS weight$$,
+    incremental => true
+);
+
+-- ... underlying AGE data changes ...
+
+-- Default: re-runs the queries, diffs by identity (AGE graphid for nodes,
+-- (src, dst) for edges), and appends/tombstones/updates only the delta.
+SELECT age_gds.graph_reindex('social_proj');
+
+-- Force a full rebuild instead (e.g. if you suspect drift):
+SELECT age_gds.graph_reindex('social_proj', force := true);
+```
+
+`graph_list()`'s `incremental` column reports which storage kind a projection
+uses; `live` is `true` only for `graph_index`-created projections (trigger-
+maintained) and always implies `incremental = true`.
+
+See also: [Plan 10: Cross-Backend Cache Invalidation](implemented-plans/10-snapshot-version-cache.md)
 
 ---
 
@@ -528,6 +573,16 @@ SELECT count(*) FROM age_gds.pageRank_stream(graph_name => 'social_proj');
 
 LRU eviction runs automatically when the cache exceeds `age_gds.session_cache_mb`.
 The memory estimate per graph is `node_count * 8 + edge_count * 20` bytes.
+
+**Cross-backend invalidation**: every cache hit — for both flat and
+incremental storage — cheaply checks a version stamp on disk
+(`content_version` for flat `.bin` files, `version_counter` for incremental
+`.nodes`/`.edges` files) before returning the cached graph. If another
+backend ran `graph_reindex` (or, for live indices, a trigger fired) since this
+backend last loaded the graph, the mismatch is detected and the graph is
+transparently reloaded. No explicit `cache_load` or coordination between
+backends is required — a `graph_reindex` in one session becomes visible to
+every other session on its next use of that projection.
 
 Anonymous execution never populates the cache:
 
@@ -658,6 +713,12 @@ and re-project:
 SELECT age_gds.graph_drop('myproj');
 SELECT age_gds.graph_project(...);
 ```
+
+### `graph_reindex: flat projection "X" has no incremental mode (force := false is invalid)`
+
+`force := false` was passed to `graph_reindex` on a projection created without
+`incremental := true`. Flat storage only supports a full rebuild — omit
+`force` (or pass `force := true`, accepted as a no-op) instead.
 
 ### `set-valued function called in context that cannot accept a set`
 

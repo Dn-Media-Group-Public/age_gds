@@ -99,8 +99,23 @@ uint64_t index_storage_find_edge(
 // Tombstone an edge slot.  Does NOT bump version_counter.
 void index_storage_kill_edge(const char *edges_path, uint64_t slot);
 
+// Overwrite the weight field of an existing (non-tombstoned) edge slot in
+// place.  Used by the graph_project(incremental) diff-apply reindex when an
+// edge's identity (src_gid, dst_gid) is unchanged but its weight changed.
+// Does NOT bump version_counter.
+void index_storage_set_edge_weight(
+    const char *edges_path,
+    uint64_t    slot,
+    double      weight);
+
 // Increment version_counter in the nodes file header.
 void index_storage_bump_version(const char *nodes_path);
+
+// Overwrite version_counter with an explicit value. Used when rewriting a
+// file from scratch (index_storage_write_initial always resets it to 1),
+// so the caller can force it past a previously-observed value and guarantee
+// every session cache's version check notices the change.
+void index_storage_set_version(const char *nodes_path, uint64_t version);
 
 // Deserialize both files into an IndexDeserializedGraph.
 // Slot indices in the file are mapped to compact nk::nodes in the result.

@@ -395,12 +395,48 @@ void index_storage_kill_edge(const char *edges_path, uint64_t slot)
     }
 }
 
+void index_storage_set_edge_weight(
+    const char *edges_path,
+    uint64_t    slot,
+    double      weight)
+{
+    int fd = open_rdwr(edges_path);
+    try {
+        EdgesFileHeader hdr = read_edges_hdr(fd, edges_path);
+
+        EdgeRecord rec{};
+        off_t rec_off = static_cast<off_t>(sizeof(hdr) + slot * sizeof(EdgeRecord));
+        pr_checked(fd, &rec, sizeof(rec), rec_off, edges_path);
+        rec.weight = weight;
+        pw_checked(fd, &rec, sizeof(rec), rec_off, edges_path);
+
+        ::close(fd);
+    } catch (...) {
+        ::close(fd);
+        throw;
+    }
+}
+
 void index_storage_bump_version(const char *nodes_path)
 {
     int fd = open_rdwr(nodes_path);
     try {
         NodesFileHeader hdr = read_nodes_hdr(fd, nodes_path);
         hdr.version_counter++;
+        pw_checked(fd, &hdr, sizeof(hdr), 0, nodes_path);
+        ::close(fd);
+    } catch (...) {
+        ::close(fd);
+        throw;
+    }
+}
+
+void index_storage_set_version(const char *nodes_path, uint64_t version)
+{
+    int fd = open_rdwr(nodes_path);
+    try {
+        NodesFileHeader hdr = read_nodes_hdr(fd, nodes_path);
+        hdr.version_counter = version;
         pw_checked(fd, &hdr, sizeof(hdr), 0, nodes_path);
         ::close(fd);
     } catch (...) {

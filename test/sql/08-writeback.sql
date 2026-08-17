@@ -37,4 +37,4 @@ SELECT age_gds.pageRank_write(
 );
 
 SELECT age_gds.graph_drop('people');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

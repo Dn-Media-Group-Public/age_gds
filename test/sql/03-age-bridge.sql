@@ -42,4 +42,4 @@ SELECT age_gds.graph_project(
 -- Cleanup
 SELECT age_gds.graph_drop('people');
 SELECT age_gds.graph_drop('empty');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

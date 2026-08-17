@@ -28,4 +28,4 @@ SELECT count(*) FROM age_gds.node2vec_stream(
 -- expected: 0
 
 SELECT age_gds.graph_drop('people');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

@@ -26,4 +26,4 @@ SELECT count(*) FROM age_gds.linkprediction_preferentialAttachment_stream(graph_
 SELECT count(*) FROM age_gds.linkprediction_resourceAllocation_stream(graph_name => 'people');
 
 SELECT age_gds.graph_drop('people');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

@@ -22,4 +22,4 @@ SELECT age_gds.graph_is_stale('people');
 -- must raise ERROR
 \set ON_ERROR_STOP on
 
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

@@ -76,11 +76,11 @@ Every algorithm SQL function supports two mutually exclusive modes.
 ```
 graph_project('name', 'age_graph', node_query, edge_query)
   → age_load_graph()          (AGE Cypher → NetworKit::Graph + NodeIdMap)
-  → gds_serialize()           (NetworKit::Graph → .bin file on disk)
+  → gds_serialize()           (NetworKit::Graph → .bin file on disk, content_version=0)
   → INSERT age_gds.graphs     (catalog row with file_path, counts, metadata)
 
 pageRank_stream(graph_name => 'name')
-  → session_cache_get()       (cache hit: return cached ProjectedGraph)
+  → session_cache_get()       (cache hit: gds_read_version() check — reload if changed)
                               (cache miss: gds_deserialize() + LRU insert)
   → NetworKit::PageRank.run()
   → SRF rows via tuplestore
@@ -89,7 +89,39 @@ pageRank_stream(graph_name => 'name')
 The projection is durable: the `.bin` file and catalog row survive across
 backend connections. Any backend that calls an algorithm with `graph_name`
 will deserialize the file on first use and cache the result in its own
-per-backend LRU cache.
+per-backend LRU cache. A `graph_reindex` in one backend bumps `content_version`
+in the `.bin` header; every other backend's next cache hit notices the
+mismatch and reloads (see [Session cache](#session-cache) below).
+
+### `incremental` storage (optional, both `graph_project` and `graph_index`)
+
+`age_gds.graphs.incremental` is orthogonal to `live`: it selects the on-disk
+*storage format* (slot/tombstone `.nodes`/`.edges` files, the same format live
+indices use), independent of whether AGE triggers are installed on top of it.
+
+|              | `live = false`                          | `live = true`            |
+|--------------|------------------------------------------|--------------------------|
+| `incremental = false` | **default `graph_project`** — flat `.bin`, full-rebuild-only reindex | not possible |
+| `incremental = true`  | `graph_project(incremental := true)` — slot/tombstone, diff-or-full reindex | `graph_index` (unchanged) |
+
+```
+graph_project('name', 'age_graph', node_query, edge_query, incremental => true)
+  → age_load_graph()             (AGE Cypher → NetworKit::Graph + NodeIdMap)
+  → index_storage_write_initial() (slot/tombstone .nodes/.edges files, version_counter=1)
+  → INSERT age_gds.graphs        (incremental=true, nodes_file_path, edges_file_path)
+```
+
+`graph_reindex('name')` on an `incremental`, non-`live` projection re-runs
+`node_query`/`edge_query`, diffs the result against the current slot tables by
+identity (AGE graphid for nodes, `(src_gid, dst_gid)` for edges), and applies
+only the delta via `index_storage`'s existing append/tombstone primitives plus
+a new weight-update-in-place primitive (`index_storage_set_edge_weight`) for
+edges whose identity is unchanged but whose weight changed. `graph_reindex(
+'name', force := true)` instead discards the diff and rewrites the slot files
+from scratch (`index_storage_write_initial`), like a fresh `graph_project`.
+
+This reuses the exact same session-cache version-check machinery live indices
+already use (`incremental` gates that code path, not `live`).
 
 ### Anonymous execution (query-scoped)
 
@@ -238,24 +270,43 @@ Implemented in `src/catalog/session_cache.cpp`.
   keyed by projection name. The map lives for the lifetime of the backend
   process.
 
-- **Cache miss**: `session_cache_get()` looks up the `file_path` from
-  `age_gds.graphs` via SPI, calls `gds_deserialize()`, computes an approximate
-  byte cost (`node_count * 8 + edge_count * 20`), evicts LRU entries until
-  the new entry fits within the `age_gds.session_cache_mb` GUC limit, then
-  inserts the `ProjectedGraph`.
+- **Cache miss**: `session_cache_get()` looks up `file_path`/`nodes_file_path`/
+  `edges_file_path`/`incremental` from `age_gds.graphs` via SPI, deserializes
+  (`gds_deserialize()` for flat storage, `index_storage_deserialize()` for
+  incremental storage), computes an approximate byte cost
+  (`node_count * 8 + edge_count * 20`), evicts LRU entries until the new entry
+  fits within the `age_gds.session_cache_mb` GUC limit, then inserts the
+  `ProjectedGraph`.
 
 - **LRU eviction**: `evict_lru()` does a linear scan of the map and removes
   the entry with the oldest `last_used` (`std::chrono::steady_clock::time_point`).
   It is called in a loop until sufficient space is available or the cache is
   empty.
 
-- **Cache hit**: the `last_used` timestamp is refreshed on every access.
+- **Cache hit — version check**: every cache hit re-checks a cheap
+  `content_version` on disk before returning the cached graph, regardless of
+  storage kind:
+  - Incremental storage (`ProjectedGraph::incremental == true`): `pread`s
+    `version_counter` from the `.nodes` header via `index_storage_read_version()`.
+  - Flat storage (`incremental == false`): `pread`s `content_version` from the
+    `.bin` header via `gds_read_version()`.
 
-- **Invalidation**: `session_cache_invalidate(name)` is called by `graph_drop`.
-  `session_cache_clear()` runs on backend exit via `on_proc_exit`.
+  A mismatch against the cached `ProjectedGraph::content_version` triggers a
+  full reload and replaces the cache entry; a match just refreshes `last_used`
+  and returns the cached graph. This makes a `graph_reindex` performed by one
+  backend visible to every other backend's cache without any explicit
+  cross-backend signal — each backend notices on its own next access.
 
-- **Lifetime**: the cache is per-backend (process-local). There is no shared
-  memory or cross-backend invalidation.
+- **Invalidation**: `session_cache_invalidate(name)` is called by `graph_drop`
+  and by the reindexing backend itself (so it doesn't wait for its own version
+  check). `session_cache_clear()` runs on backend exit via `on_proc_exit`.
+
+- **Lifetime**: the cache is per-backend (process-local); there is no shared
+  memory. Cross-backend visibility of mutations is achieved purely through the
+  on-disk `content_version`/`version_counter` check described above, not
+  through any shared cache state.
+
+See also: [Plan 10: Cross-Backend Cache Invalidation](implemented-plans/10-snapshot-version-cache.md)
 
 - **Memory estimation**: `approx_bytes = node_count * 8 + edge_count * 20`.
   This is the same formula used by `graph_list()` to report `memoryUsage`.

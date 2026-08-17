@@ -20,6 +20,7 @@
 #include <networkit/Globals.hpp>
 
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <limits>
 #include <stdexcept>

@@ -26,9 +26,20 @@ struct ProjectedGraph {
 
     // --- Live index fields (populated only when live=true) ---
     bool     live             = false;
-    uint64_t index_version    = 0;   // version_counter at last load from files
+
+    // --- Incremental (slot/tombstone) storage fields ---
+    // Set whenever the catalog row has incremental=true, regardless of
+    // whether AGE triggers are installed on top (live).
+    bool     incremental      = false;
     std::string nodes_file_path;
     std::string edges_file_path;
+
+    // --- Flat storage field (populated only when incremental=false) ---
+    std::string file_path;
+
+    // content_version: version_counter (incremental storage) or
+    // gds header content_version (flat storage) as of the last load.
+    uint64_t content_version  = 0;
 
     // (src_nk, dst_nk) -> slot index in edges file; used for O(1) edge lookup
     // in trigger functions that operate on the cached graph.

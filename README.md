@@ -29,6 +29,7 @@ SELECT age_gds.pageRank_write(graph_name => 'social', write_property => 'pageran
 - **Two execution modes.** Use a *persistent projection* (serialized to disk, cached per-backend) for repeated queries. Use *anonymous mode* for one-off analysis with no catalog overhead.
 - **SQL-native results.** Every algorithm returns a set-returning function. Join results against your application tables, `ORDER BY`, `LIMIT`, write back to AGE — it is just SQL.
 - **Write-back included.** `pageRank_write` and `betweenness_write` persist scores directly onto AGE nodes as Cypher properties.
+- **Cheap, automatic cache invalidation.** `graph_reindex` in one backend is picked up by every other backend's session cache on its next use — no manual coordination. Optionally project with `incremental := true` for diff-based (rather than full-rebuild) reindexing on large graphs.
 
 ## Algorithms
 

@@ -12,11 +12,16 @@
 #include "catalog/serialization.h"
 #include "catalog/session_cache.h"
 #include "bridge/age_loader.h"
+#include "util/pair_hash.h"
 
 #include <string>
 #include <cstring>
 #include <cerrno>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 extern "C" {
 #include "postgres.h"
@@ -189,6 +194,199 @@ static void install_label_trigger(
                  errmsg("graph_index: index_triggers insert failed (SPI %d)", ret)));
 }
 
+/*
+ * Discover all (non-meta) labels on age_graph_str and install a trigger for
+ * any label that doesn't already have one recorded in index_triggers for
+ * this index (install_label_trigger's ON CONFLICT DO NOTHING on the catalog
+ * insert doesn't stop CREATE TRIGGER from re-running, so we filter here).
+ * Runs inside an already-open SPI session.
+ */
+static void install_missing_label_triggers(
+    const char *index_name,
+    const char *age_graph_str)
+{
+    struct LabelInfo { std::string name; char kind; };
+    std::vector<LabelInfo> labels;
+
+    {
+        Oid   argtypes[1] = {TEXTOID};
+        Datum args[1]     = {CStringGetTextDatum(age_graph_str)};
+
+        int ret = SPI_execute_with_args(
+            "SELECT al.name, al.kind "
+            "FROM ag_catalog.ag_label al "
+            "JOIN ag_catalog.ag_graph ag ON al.graph = ag.graphid "
+            "WHERE ag.name = $1",
+            1, argtypes, args, nullptr, true, 0);
+
+        if (ret != SPI_OK_SELECT)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_reindex: label query failed (SPI %d)", ret)));
+
+        for (uint64_t i = 0; i < SPI_processed; i++) {
+            bool  isnull;
+            Datum dn = SPI_getbinval(SPI_tuptable->vals[i],
+                                      SPI_tuptable->tupdesc, 1, &isnull);
+            Datum dk = SPI_getbinval(SPI_tuptable->vals[i],
+                                      SPI_tuptable->tupdesc, 2, &isnull);
+            if (isnull) continue;
+            char *lname = pstrdup(NameStr(*DatumGetName(dn)));
+            char  lkind = DatumGetChar(dk);
+            if (strcmp(lname, "_ag_label_vertex") == 0) continue;
+            if (strcmp(lname, "_ag_label_edge")   == 0) continue;
+            labels.push_back({std::string(lname), lkind});
+        }
+    }
+
+    for (auto &li : labels) {
+        Oid   argtypes[2] = {TEXTOID, TEXTOID};
+        Datum args[2]     = {
+            CStringGetTextDatum(index_name),
+            CStringGetTextDatum(li.name.c_str())
+        };
+        int ret = SPI_execute_with_args(
+            "SELECT 1 FROM age_gds.index_triggers "
+            "WHERE graph_name = $1 AND table_name = $2",
+            2, argtypes, args, nullptr, true, 1);
+
+        bool already_installed = (ret == SPI_OK_SELECT && SPI_processed > 0);
+        if (!already_installed)
+            install_label_trigger(index_name, age_graph_str,
+                                  li.name.c_str(), li.kind);
+    }
+}
+
+/*
+ * Overwrite <nodes_path>/<edges_path> from scratch with `loaded`, then bump
+ * version_counter until it differs from its pre-rebuild value so that every
+ * backend's cached copy is recognized as stale.
+ */
+static void rebuild_slot_files_from_scratch(
+    const char       *nodes_path,
+    const char       *edges_path,
+    const LoadedGraph &loaded,
+    bool              directed,
+    bool              weighted)
+{
+    uint64_t old_version = 0;
+    try {
+        old_version = index_storage_read_version(nodes_path);
+    } catch (...) {
+        /* file may not exist yet; treat as 0 */
+    }
+
+    try {
+        index_storage_write_initial(nodes_path, edges_path,
+                                    loaded.graph, loaded.id_map,
+                                    directed, weighted);
+        /* write_initial always resets version_counter to 1; force it past
+         * old_version so every session cache's version check notices the
+         * rewrite, regardless of how high old_version already was. */
+        index_storage_set_version(nodes_path, old_version + 1);
+    } catch (const std::exception &ex) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("graph_reindex: full rebuild failed: %s", ex.what())));
+    }
+}
+
+/*
+ * Query-diff-driven incremental reindex: re-run node_query/edge_query, diff
+ * against the current slot/tombstone files by identity (graphid for nodes,
+ * (src_gid, dst_gid) for edges), and apply only the delta via index_storage's
+ * append/tombstone/weight-update primitives. Bumps version_counter once.
+ */
+static void diff_apply_reindex(
+    const char *nodes_path,
+    const char *edges_path,
+    const char *age_graph,
+    const char *node_query,
+    const char *edge_query,
+    bool        directed,
+    bool        weighted,
+    int64_t    &out_node_count,
+    int64_t    &out_edge_count)
+{
+    LoadedGraph new_loaded = age_load_graph(age_graph, node_query, edge_query,
+                                            directed, weighted);
+
+    IndexDeserializedGraph old_dg;
+    try {
+        old_dg = index_storage_deserialize(nodes_path, edges_path);
+    } catch (const std::exception &ex) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("graph_reindex: deserialize failed: %s", ex.what())));
+    }
+
+    std::unordered_set<int64_t> new_node_gids;
+    for (auto &kv : new_loaded.id_map.graphid_to_nk)
+        new_node_gids.insert(kv.first);
+
+    std::unordered_set<int64_t> old_node_gids;
+    for (auto &kv : old_dg.id_map.graphid_to_nk)
+        old_node_gids.insert(kv.first);
+
+    struct OldEdgeInfo { double weight; uint64_t file_slot; };
+    std::unordered_map<std::pair<int64_t,int64_t>, OldEdgeInfo, PairHash> old_edges;
+    for (auto &kv : old_dg.edge_file_index) {
+        NetworKit::node src_nk = kv.first.first;
+        NetworKit::node dst_nk = kv.first.second;
+        int64_t src_gid = old_dg.id_map.resolve(src_nk);
+        int64_t dst_gid = old_dg.id_map.resolve(dst_nk);
+        double  w       = old_dg.graph.weight(src_nk, dst_nk);
+        old_edges[{src_gid, dst_gid}] = OldEdgeInfo{w, kv.second};
+    }
+
+    std::unordered_map<std::pair<int64_t,int64_t>, double, PairHash> new_edges;
+    new_loaded.graph.forEdges([&](NetworKit::node u, NetworKit::node v,
+                                  NetworKit::edgeweight w) {
+        int64_t src_gid = new_loaded.id_map.resolve(u);
+        int64_t dst_gid = new_loaded.id_map.resolve(v);
+        new_edges[{src_gid, dst_gid}] = static_cast<double>(w);
+    });
+
+    try {
+        for (int64_t gid : old_node_gids) {
+            if (new_node_gids.count(gid)) continue;
+            uint64_t slot = index_storage_find_node(nodes_path, gid);
+            if (slot != UINT64_MAX)
+                index_storage_kill_node(nodes_path, slot);
+        }
+        for (int64_t gid : new_node_gids) {
+            if (old_node_gids.count(gid)) continue;
+            index_storage_add_node(nodes_path, gid);
+        }
+
+        for (auto &kv : old_edges) {
+            if (new_edges.count(kv.first)) continue;
+            index_storage_kill_edge(edges_path, kv.second.file_slot);
+        }
+        for (auto &kv : new_edges) {
+            auto it = old_edges.find(kv.first);
+            if (it == old_edges.end()) {
+                uint64_t src_slot = index_storage_find_node(nodes_path, kv.first.first);
+                uint64_t dst_slot = index_storage_find_node(nodes_path, kv.first.second);
+                if (src_slot == UINT64_MAX || dst_slot == UINT64_MAX)
+                    continue; /* shouldn't happen: node diff ran first */
+                index_storage_add_edge(edges_path, src_slot, dst_slot, kv.second);
+            } else if (it->second.weight != kv.second) {
+                index_storage_set_edge_weight(edges_path, it->second.file_slot, kv.second);
+            }
+        }
+
+        index_storage_bump_version(nodes_path);
+    } catch (const std::exception &ex) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("graph_reindex: diff-apply failed: %s", ex.what())));
+    }
+
+    out_node_count = (int64_t) new_node_gids.size();
+    out_edge_count = (int64_t) new_edges.size();
+}
+
 /* ============================================================ C functions == */
 
 extern "C" {
@@ -261,8 +459,8 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
         int ret = SPI_execute_with_args(
             "INSERT INTO age_gds.graphs "
             "(name, age_graph, node_count, edge_count, directed, weighted, "
-            " live, nodes_file_path, edges_file_path) "
-            "VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)",
+            " live, incremental, nodes_file_path, edges_file_path) "
+            "VALUES ($1, $2, $3, $4, $5, $6, true, true, $7, $8)",
             8, argtypes, args, nullptr, false, 0);
         if (ret != SPI_OK_INSERT)
             ereport(ERROR,
@@ -322,7 +520,16 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
 
 Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
 {
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("graph_reindex: name must not be NULL")));
+
     char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+    /* force: NULL = mode-appropriate default */
+    bool force_is_null = PG_ARGISNULL(1);
+    bool force_val     = force_is_null ? false : PG_GETARG_BOOL(1);
 
     /* Look up catalog */
     char  nodes_path[MAXPGPATH] = {0};
@@ -332,6 +539,7 @@ Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
     char  node_query[4096]      = {0};
     char  edge_query[4096]      = {0};
     bool  is_live               = false;
+    bool  is_incremental        = false;
     bool  is_directed           = false;
     bool  is_weighted           = false;
 
@@ -342,7 +550,7 @@ Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
         int   ret         = SPI_execute_with_args(
             "SELECT live, nodes_file_path, edges_file_path, "
             "       file_path, age_graph, node_query, edge_query, "
-            "       directed, weighted "
+            "       directed, weighted, incremental "
             "FROM age_gds.graphs WHERE name = $1",
             1, argtypes, args, nullptr, true, 1);
 
@@ -375,33 +583,23 @@ Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
         GET_TEXT(5, age_graph);
         GET_TEXT(6, node_query);
         GET_TEXT(7, edge_query);
-        is_directed = GET_BOOL(8);
-        is_weighted = GET_BOOL(9);
+        is_directed    = GET_BOOL(8);
+        is_weighted    = GET_BOOL(9);
+        is_incremental = GET_BOOL(10);
 #undef GET_BOOL
 #undef GET_TEXT
     }
     SPI_finish();
 
-    if (is_live) {
-        /* Live index: compact files */
-        if (nodes_path[0] == '\0' || edges_path[0] == '\0')
+    if (!is_incremental) {
+        /* ---- Flat storage (graph_project default) ---- */
+        if (force_is_null == false && force_val == false)
             ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("graph_reindex: live index \"%s\" has no file paths",
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("graph_reindex: flat projection \"%s\" has no "
+                            "incremental mode (force := false is invalid)",
                             name_str)));
 
-        /* Exclusive advisory lock — released at transaction end automatically */
-        acquire_index_lock(name_str);
-        try {
-            index_storage_compact(nodes_path, edges_path);
-        } catch (const std::exception &ex) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("graph_reindex: compact failed: %s", ex.what())));
-        }
-        session_cache_invalidate(name_str);
-    } else {
-        /* Snapshot: rebuild from Cypher queries */
         if (age_graph[0] == '\0' || node_query[0] == '\0' || edge_query[0] == '\0')
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -413,11 +611,18 @@ Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
                      errmsg("graph_reindex: snapshot \"%s\" has no file_path",
                             name_str)));
 
+        uint64_t old_version = 0;
+        try {
+            old_version = gds_read_version(file_path);
+        } catch (...) {
+            /* fall through with old_version = 0 */
+        }
+
         LoadedGraph loaded = age_load_graph(age_graph, node_query, edge_query,
                                             is_directed, is_weighted);
         try {
             gds_serialize(file_path, loaded.graph, loaded.id_map,
-                          is_directed, is_weighted);
+                          is_directed, is_weighted, old_version + 1);
         } catch (const std::exception &ex) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
@@ -440,6 +645,102 @@ Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
                 3, argtypes, args, nullptr, false, 0);
         }
         SPI_finish();
+
+        session_cache_invalidate(name_str);
+
+    } else if (!is_live) {
+        /* ---- Incremental, non-live: graph_project(incremental := true) ---- */
+        if (nodes_path[0] == '\0' || edges_path[0] == '\0')
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_reindex: \"%s\" has no file paths", name_str)));
+        if (age_graph[0] == '\0' || node_query[0] == '\0' || edge_query[0] == '\0')
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("graph_reindex: \"%s\" is missing queries", name_str)));
+
+        acquire_index_lock(name_str);
+
+        int64_t nc = 0, ec = 0;
+        if (force_is_null == false && force_val == true) {
+            /* Full rebuild: fresh load into new slot files */
+            LoadedGraph loaded = age_load_graph(age_graph, node_query, edge_query,
+                                                is_directed, is_weighted);
+            rebuild_slot_files_from_scratch(nodes_path, edges_path, loaded,
+                                            is_directed, is_weighted);
+            nc = (int64_t) loaded.graph.numberOfNodes();
+            ec = (int64_t) loaded.graph.numberOfEdges();
+        } else {
+            /* Diff-and-apply (default) */
+            diff_apply_reindex(nodes_path, edges_path,
+                               age_graph, node_query, edge_query,
+                               is_directed, is_weighted, nc, ec);
+        }
+
+        SPI_connect();
+        {
+            Oid   argtypes[3] = {INT8OID, INT8OID, TEXTOID};
+            Datum args[3]     = {
+                Int64GetDatum(nc),
+                Int64GetDatum(ec),
+                CStringGetTextDatum(name_str)
+            };
+            SPI_execute_with_args(
+                "UPDATE age_gds.graphs SET node_count=$1, edge_count=$2 WHERE name=$3",
+                3, argtypes, args, nullptr, false, 0);
+        }
+        SPI_finish();
+
+        session_cache_invalidate(name_str);
+
+    } else {
+        /* ---- Incremental, live: graph_index ---- */
+        if (nodes_path[0] == '\0' || edges_path[0] == '\0')
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_reindex: live index \"%s\" has no file paths",
+                            name_str)));
+
+        acquire_index_lock(name_str);
+
+        if (force_is_null == false && force_val == true) {
+            /* Full re-load from AGE: rediscover labels, rebuild slot files
+             * from scratch. Triggers already installed stay installed;
+             * install any missing ones for newly-discovered labels. */
+            const char *node_q = "MATCH (n) RETURN id(n) AS id";
+            const char *edge_q = "MATCH (a)-[r]->(b) "
+                                 "RETURN id(a) AS src, id(b) AS dst, r.weight AS weight";
+            LoadedGraph loaded = age_load_graph(age_graph, node_q, edge_q,
+                                                is_directed, is_weighted);
+            rebuild_slot_files_from_scratch(nodes_path, edges_path, loaded,
+                                            is_directed, is_weighted);
+
+            SPI_connect();
+            install_missing_label_triggers(name_str, age_graph);
+            {
+                int64_t nc = (int64_t) loaded.graph.numberOfNodes();
+                int64_t ec = (int64_t) loaded.graph.numberOfEdges();
+                Oid   argtypes[3] = {INT8OID, INT8OID, TEXTOID};
+                Datum args[3]     = {
+                    Int64GetDatum(nc),
+                    Int64GetDatum(ec),
+                    CStringGetTextDatum(name_str)
+                };
+                SPI_execute_with_args(
+                    "UPDATE age_gds.graphs SET node_count=$1, edge_count=$2 WHERE name=$3",
+                    3, argtypes, args, nullptr, false, 0);
+            }
+            SPI_finish();
+        } else {
+            /* Compact (default): rewrite files without tombstones */
+            try {
+                index_storage_compact(nodes_path, edges_path);
+            } catch (const std::exception &ex) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INTERNAL_ERROR),
+                         errmsg("graph_reindex: compact failed: %s", ex.what())));
+            }
+        }
 
         session_cache_invalidate(name_str);
     }

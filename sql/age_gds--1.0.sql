@@ -26,7 +26,11 @@ CREATE TABLE age_gds.graphs (
     projected_by     text,
     live             boolean     NOT NULL DEFAULT false,
     nodes_file_path  text,                          -- live index .nodes mmap file
-    edges_file_path  text                           -- live index .edges mmap file
+    edges_file_path  text,                          -- live index .edges mmap file
+    incremental      boolean     NOT NULL DEFAULT false
+                                    -- true  => nodes_file_path/edges_file_path slot/tombstone storage
+                                    -- false => file_path flat .bin storage
+                                    -- orthogonal to `live` (live implies incremental, not vice versa)
 );
 
 -- -------------------------------------------------------------------------
@@ -51,7 +55,8 @@ CREATE FUNCTION age_gds.graph_project(
     node_query  text,
     edge_query  text,
     directed    boolean DEFAULT false,
-    weighted    boolean DEFAULT false
+    weighted    boolean DEFAULT false,
+    incremental boolean DEFAULT false
 ) RETURNS void
     AS 'age_gds', 'age_gds_graph_project'
     LANGUAGE C;
@@ -89,7 +94,8 @@ CREATE FUNCTION age_gds.graph_list()
         file_path     text,
         created_at    timestamptz,
         "memoryUsage" bigint,
-        live          boolean
+        live          boolean,
+        incremental   boolean
     )
     AS 'age_gds', 'age_gds_graph_list'
     LANGUAGE C;
@@ -99,10 +105,12 @@ CREATE FUNCTION age_gds.graph_exists(name text)
     AS 'age_gds', 'age_gds_graph_exists'
     LANGUAGE C STRICT;
 
-CREATE FUNCTION age_gds.graph_reindex(name text)
-    RETURNS void
+CREATE FUNCTION age_gds.graph_reindex(
+    name  text,
+    force boolean DEFAULT NULL
+) RETURNS void
     AS 'age_gds', 'age_gds_graph_reindex'
-    LANGUAGE C STRICT;
+    LANGUAGE C;
 
 -- -------------------------------------------------------------------------
 -- Session cache

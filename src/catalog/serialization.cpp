@@ -29,7 +29,8 @@ void gds_serialize(
     const NetworKit::Graph &graph,
     const NodeIdMap        &id_map,
     bool                    directed,
-    bool                    weighted)
+    bool                    weighted,
+    uint64_t                content_version)
 {
     std::string tmp_path = std::string(path) + ".tmp";
 
@@ -45,14 +46,15 @@ void gds_serialize(
         uint32_t flags      = (directed ? 1u : 0u) | (weighted ? 2u : 0u);
         uint64_t node_count = graph.numberOfNodes();
         uint64_t edge_count = graph.numberOfEdges();
-        uint8_t  reserved[24] = {};
+        uint8_t  reserved[16] = {};
 
-        checked_write(f, &magic,      8, tmp_path);
-        checked_write(f, &version,    4, tmp_path);
-        checked_write(f, &flags,      4, tmp_path);
-        checked_write(f, &node_count, 8, tmp_path);
-        checked_write(f, &edge_count, 8, tmp_path);
-        checked_write(f, reserved,   24, tmp_path);
+        checked_write(f, &magic,           8, tmp_path);
+        checked_write(f, &version,         4, tmp_path);
+        checked_write(f, &flags,           4, tmp_path);
+        checked_write(f, &node_count,      8, tmp_path);
+        checked_write(f, &edge_count,      8, tmp_path);
+        checked_write(f, &content_version, 8, tmp_path);
+        checked_write(f, reserved,        16, tmp_path);
 
         /* Node table */
         auto graphids = id_map.to_vector();
@@ -103,14 +105,16 @@ DeserializedGraph gds_deserialize(const char *path)
         uint64_t magic;
         uint32_t version, flags;
         uint64_t node_count, edge_count;
-        uint8_t  reserved[24];
+        uint64_t content_version;
+        uint8_t  reserved[16];
 
-        checked_read(f, &magic,      8, path);
-        checked_read(f, &version,    4, path);
-        checked_read(f, &flags,      4, path);
-        checked_read(f, &node_count, 8, path);
-        checked_read(f, &edge_count, 8, path);
-        checked_read(f, reserved,   24, path);
+        checked_read(f, &magic,           8, path);
+        checked_read(f, &version,         4, path);
+        checked_read(f, &flags,           4, path);
+        checked_read(f, &node_count,      8, path);
+        checked_read(f, &edge_count,      8, path);
+        checked_read(f, &content_version, 8, path);
+        checked_read(f, reserved,        16, path);
 
         if (magic != GDS_MAGIC)
             throw std::runtime_error(std::string(path) + ": invalid magic");
@@ -122,8 +126,9 @@ DeserializedGraph gds_deserialize(const char *path)
 
         /* Node table — build id_map in nk::node order */
         DeserializedGraph result;
-        result.directed = directed;
-        result.weighted = weighted;
+        result.directed       = directed;
+        result.weighted       = weighted;
+        result.content_version = content_version;
 
         for (uint64_t i = 0; i < node_count; i++) {
             int64_t gid;
@@ -153,4 +158,28 @@ DeserializedGraph gds_deserialize(const char *path)
         std::fclose(f);
         throw;
     }
+}
+
+/* ---------------------------------------------------------- read_version */
+
+uint64_t gds_read_version(const char *path)
+{
+    FILE *f = std::fopen(path, "rb");
+    if (!f)
+        throw std::runtime_error(
+            std::string("cannot open ") + path + ": " + std::strerror(errno));
+
+    uint64_t content_version = 0;
+    try {
+        /* content_version starts at byte offset 32 (magic 8 + version 4 +
+         * flags 4 + node_count 8 + edge_count 8) */
+        if (std::fseek(f, 32, SEEK_SET) != 0)
+            throw std::runtime_error(std::string("seek error on ") + path);
+        checked_read(f, &content_version, 8, path);
+    } catch (...) {
+        std::fclose(f);
+        throw;
+    }
+    std::fclose(f);
+    return content_version;
 }

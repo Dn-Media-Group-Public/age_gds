@@ -93,24 +93,51 @@ See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.m
 ### `age_gds.graph_reindex`
 
 ```sql
-age_gds.graph_reindex(name text) RETURNS void
+age_gds.graph_reindex(
+    name  text,
+    force boolean DEFAULT NULL   -- NULL = mode-appropriate default
+) RETURNS void
 ```
 
-Behaviour depends on the projection mode:
+Behaviour depends on the projection's storage kind (`incremental`) and mode
+(`live`):
 
-- **Live index**: compacts the `.nodes` and `.edges` binary files by rewriting
-  them without tombstoned (deleted) entries. Invalidates the session cache so
-  the next algorithm call re-reads the compacted files. Does **not** reload
-  data from AGE; only removes stale entries from the existing live-index files.
+| Storage                                   | `force` NULL (default) | `force = true`                          | `force = false`                          |
+|--------------------------------------------|-------------------------|------------------------------------------|-------------------------------------------|
+| flat (`graph_project` default)             | full rebuild            | full rebuild (accepted, no-op vs. default) | **error** — flat storage has no incremental mode |
+| incremental, non-live (`graph_project(incremental := true)`) | diff-and-apply | full rebuild (fresh slot files) | diff-and-apply (explicit, same as default) |
+| incremental, live (`graph_index`)          | compact                 | full re-load from AGE (rediscover labels, rebuild slot files, triggers stay installed) | compact (explicit, same as default) |
 
-- **Snapshot**: drops and rebuilds the projection from the stored Cypher queries
-  (equivalent to `graph_drop` + `graph_project`).
+- **Full rebuild (flat)**: re-runs the stored `node_query`/`edge_query` and
+  rewrites the `.bin` file, bumping `content_version` so every backend's
+  session cache notices and reloads on next use (see
+  [Session cache](architecture.md#session-cache)).
+
+- **Diff-and-apply (incremental, non-live)**: re-runs `node_query`/`edge_query`
+  and diffs the result against the current slot/tombstone tables by identity
+  (AGE graphid for nodes, `(src_gid, dst_gid)` for edges). Adds/removes only
+  the delta; an edge present in both with a changed weight is updated in place
+  rather than tombstoned and re-appended. Bumps `version_counter` once.
+
+- **Compact (live, default)**: rewrites the `.nodes`/`.edges` files without
+  tombstoned entries. Does **not** reload data from AGE; only removes stale
+  entries from the existing files.
+
+- **Full re-load (live, `force := true`)**: rebuilds the slot files from a
+  fresh whole-graph AGE scan (same as `graph_index`'s initial load) and
+  installs triggers for any newly-discovered labels. Existing triggers are
+  left in place.
+
+All modes invalidate the calling backend's own session cache immediately;
+every other backend's cache notices the `content_version`/`version_counter`
+change on its own next access — no cross-backend signal is needed.
 
 **Errors:**
 - `ERRCODE_UNDEFINED_OBJECT` — projection `name` does not exist.
+- `ERRCODE_INVALID_PARAMETER_VALUE` — `force := false` on a flat projection.
 - `ERRCODE_INTERNAL_ERROR` — file I/O failure.
 
-See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.md)
+See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.md), [Plan 10: Cross-Backend Cache Invalidation](implemented-plans/10-snapshot-version-cache.md)
 
 ---
 
@@ -123,7 +150,8 @@ age_gds.graph_project(
     node_query  text,
     edge_query  text,
     directed    boolean DEFAULT false,
-    weighted    boolean DEFAULT false
+    weighted    boolean DEFAULT false,
+    incremental boolean DEFAULT false
 ) RETURNS void
 ```
 
@@ -135,17 +163,24 @@ Projects an AGE Cypher graph into a persistent NetworKit graph. Execution:
 2. Runs `edge_query` against `age_graph`. The query must return three columns:
    `src agtype`, `dst agtype`, `weight agtype`. The `weight` column is used
    only when `weighted = true`; otherwise edge weight defaults to `1.0`.
-3. Serializes the resulting `NetworKit::Graph` to
-   `<age_gds.data_dir>/<name>.bin`.
+3. Serializes the resulting `NetworKit::Graph`:
+   - `incremental = false` (default): to a flat `<age_gds.data_dir>/<name>.bin`
+     file. Only a full rebuild (`graph_reindex`) can refresh it.
+   - `incremental = true`: to slot/tombstone `<name>.nodes`/`<name>.edges`
+     files — the same storage format live indices use, without installing any
+     AGE triggers. `graph_reindex` can then diff-and-apply instead of
+     rebuilding from scratch.
 4. Inserts a row into `age_gds.graphs` with the projection metadata.
 
-The operation is transactional: if the transaction is aborted, the `.bin` file
-is deleted by a registered `XactCallback`.
+The operation is transactional: if the transaction is aborted, the created
+file(s) are deleted by a registered `XactCallback`.
 
 **Errors:**
 - `ERRCODE_UNDEFINED_OBJECT` — `age_graph` does not exist in `ag_catalog.ag_graph`.
 - `ERRCODE_INTERNAL_ERROR` — serialization or SPI failure.
 - Duplicate `name` raises a unique-constraint violation from `age_gds.graphs`.
+
+See also: [Plan 10: Cross-Backend Cache Invalidation](implemented-plans/10-snapshot-version-cache.md)
 
 ---
 
@@ -156,11 +191,14 @@ age_gds.graph_drop(name text) RETURNS void
 ```
 
 Drops the projection:
-- For **snapshot** projections: deletes the catalog row, unlinks the `.bin`
-  file, and evicts the entry from the calling backend's session cache.
-- For **live index** projections: additionally drops all data triggers installed
-  on AGE label tables for this index (entries in `age_gds.index_triggers` are
-  cascade-deleted), and unlinks the `.nodes` and `.edges` files.
+- For `incremental = false` (flat) projections: deletes the catalog row,
+  unlinks the `.bin` file, and evicts the entry from the calling backend's
+  session cache.
+- For `incremental = true` projections (`graph_index`, or `graph_project(
+  incremental := true)`): unlinks the `.nodes`/`.edges` files instead.
+- For **live index** (`live = true`) projections specifically: additionally
+  drops all data triggers installed on AGE label tables for this index
+  (entries in `age_gds.index_triggers` are cascade-deleted).
 
 **Errors:**
 - `ERRCODE_UNDEFINED_OBJECT` — projection `name` does not exist.
@@ -177,17 +215,21 @@ age_gds.graph_list() RETURNS TABLE(
     edge_count    bigint,
     directed      boolean,
     weighted      boolean,
-    live          boolean,
     file_path     text,
     created_at    timestamptz,
-    "memoryUsage" bigint
+    "memoryUsage" bigint,
+    live          boolean,
+    incremental   boolean
 )
 ```
 
 Returns all rows from `age_gds.graphs`, ordered by `created_at`. The
-`live` column is `true` for live-index projections and `false` for snapshots.
-The `memoryUsage` column is a derived estimate: `node_count * 8 + edge_count * 20`
-bytes (approximate in-memory cost of the deserialized graph).
+`live` column is `true` for live-index projections and `false` otherwise. The
+`incremental` column is `true` for slot/tombstone storage (`graph_index`, or
+`graph_project(incremental := true)`) and `false` for flat `.bin` storage
+(`live` implies `incremental`, not vice versa). The `memoryUsage` column is a
+derived estimate: `node_count * 8 + edge_count * 20` bytes (approximate
+in-memory cost of the deserialized graph).
 
 ---
 

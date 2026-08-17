@@ -29,4 +29,4 @@ SELECT entry_count FROM age_gds.cache_stats();
 
 -- Cleanup
 SELECT age_gds.graph_drop('people');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;

@@ -7,6 +7,7 @@
 
 #include "catalog/serialization.h"
 #include "catalog/session_cache.h"
+#include "catalog/index_storage.h"
 #include "bridge/age_loader.h"
 
 #include <string>
@@ -98,8 +99,10 @@ static void mkdirp(const char *path)
  * graph_project so we don't leave orphaned files.  Registered once per
  * backend; only acts when g_pending_bin is non-empty.
  */
-static char g_pending_bin[MAXPGPATH]  = {0};
-static bool g_xact_cb_registered     = false;
+static char g_pending_bin[MAXPGPATH]   = {0};
+static char g_pending_nodes[MAXPGPATH] = {0};
+static char g_pending_edges[MAXPGPATH] = {0};
+static bool g_xact_cb_registered      = false;
 
 static void cleanup_bin_xact_cb(XactEvent event, void * /*arg*/)
 {
@@ -107,6 +110,14 @@ static void cleanup_bin_xact_cb(XactEvent event, void * /*arg*/)
         if (event == XACT_EVENT_ABORT)
             (void) unlink(g_pending_bin);
         g_pending_bin[0] = '\0';
+    }
+    if (g_pending_nodes[0] != '\0' || g_pending_edges[0] != '\0') {
+        if (event == XACT_EVENT_ABORT) {
+            if (g_pending_nodes[0] != '\0') (void) unlink(g_pending_nodes);
+            if (g_pending_edges[0] != '\0') (void) unlink(g_pending_edges);
+        }
+        g_pending_nodes[0] = '\0';
+        g_pending_edges[0] = '\0';
     }
 }
 
@@ -130,6 +141,7 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
     char *edge_query_str = text_to_cstring(PG_GETARG_TEXT_PP(3));
     bool  directed       = PG_GETARG_BOOL(4);
     bool  weighted       = PG_GETARG_BOOL(5);
+    bool  incremental    = PG_GETARG_BOOL(6);
 
     /* Expand data_dir */
     const char *raw_dir = GetConfigOption("age_gds.data_dir", false, false);
@@ -138,44 +150,63 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
     /* Create directory */
     mkdirp(data_dir_str);
 
-    /* Build file path */
-    char file_path[MAXPGPATH];
-    snprintf(file_path, MAXPGPATH, "%s/%s.bin", data_dir_str, name_str);
-
     /* Register per-backend XactCallback once */
     if (!g_xact_cb_registered) {
         RegisterXactCallback(cleanup_bin_xact_cb, nullptr);
         g_xact_cb_registered = true;
     }
-    /* Track pending file for abort cleanup */
-    strlcpy(g_pending_bin, file_path, MAXPGPATH);
 
     /* ---- Load graph from AGE via Cypher queries ---- */
     LoadedGraph loaded = age_load_graph(
         age_graph_str, node_query_str, edge_query_str, directed, weighted);
 
-    /* ---- Serialize to .bin file ---- */
-    try {
-        gds_serialize(file_path, loaded.graph, loaded.id_map, directed, weighted);
-    } catch (const std::exception &ex) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("graph_project serialize: %s", ex.what())));
+    int64_t node_count = (int64_t) loaded.graph.numberOfNodes();
+    int64_t edge_count = (int64_t) loaded.graph.numberOfEdges();
+
+    char file_path[MAXPGPATH]  = {0};
+    char nodes_path[MAXPGPATH] = {0};
+    char edges_path[MAXPGPATH] = {0};
+
+    if (incremental) {
+        snprintf(nodes_path, MAXPGPATH, "%s/%s.nodes", data_dir_str, name_str);
+        snprintf(edges_path, MAXPGPATH, "%s/%s.edges", data_dir_str, name_str);
+        strlcpy(g_pending_nodes, nodes_path, MAXPGPATH);
+        strlcpy(g_pending_edges, edges_path, MAXPGPATH);
+
+        try {
+            index_storage_write_initial(nodes_path, edges_path,
+                                        loaded.graph, loaded.id_map,
+                                        directed, weighted);
+        } catch (const std::exception &ex) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_project write_initial: %s", ex.what())));
+        }
+    } else {
+        snprintf(file_path, MAXPGPATH, "%s/%s.bin", data_dir_str, name_str);
+        strlcpy(g_pending_bin, file_path, MAXPGPATH);
+
+        try {
+            gds_serialize(file_path, loaded.graph, loaded.id_map,
+                         directed, weighted, /* content_version */ 0);
+        } catch (const std::exception &ex) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("graph_project serialize: %s", ex.what())));
+        }
     }
 
     /* ---- Insert catalog row via SPI ---- */
     SPI_connect();
 
-    int64_t node_count = (int64_t) loaded.graph.numberOfNodes();
-    int64_t edge_count = (int64_t) loaded.graph.numberOfEdges();
-
-    Oid   argtypes[9] = {
+    Oid   argtypes[12] = {
         TEXTOID, TEXTOID, TEXTOID, TEXTOID,
         INT8OID, INT8OID,
         BOOLOID, BOOLOID,
-        TEXTOID
+        TEXTOID, TEXTOID, TEXTOID,
+        BOOLOID
     };
-    Datum args[9] = {
+    Datum args[12] = {
         CStringGetTextDatum(name_str),        /* $1  name        */
         CStringGetTextDatum(age_graph_str),   /* $2  age_graph   */
         CStringGetTextDatum(node_query_str),  /* $3  node_query  */
@@ -184,15 +215,24 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
         Int64GetDatum(edge_count),            /* $6  edge_count  */
         BoolGetDatum(directed),               /* $7  directed    */
         BoolGetDatum(weighted),               /* $8  weighted    */
-        CStringGetTextDatum(file_path)        /* $9  file_path   */
+        CStringGetTextDatum(file_path),       /* $9  file_path   */
+        CStringGetTextDatum(nodes_path),      /* $10 nodes_file_path */
+        CStringGetTextDatum(edges_path),      /* $11 edges_file_path */
+        BoolGetDatum(incremental)             /* $12 incremental */
     };
+    char  nulls[13] = {' ',' ',' ',' ',' ',' ',' ',' ',
+                       (char) (file_path[0]  == '\0' ? 'n' : ' '),
+                       (char) (nodes_path[0] == '\0' ? 'n' : ' '),
+                       (char) (edges_path[0] == '\0' ? 'n' : ' '),
+                       ' ',
+                       '\0'};
 
     int ret = SPI_execute_with_args(
         "INSERT INTO age_gds.graphs "
         "(name, age_graph, node_query, edge_query, node_count, edge_count, "
-        " directed, weighted, file_path) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        9, argtypes, args, nullptr, false, 0);
+        " directed, weighted, file_path, nodes_file_path, edges_file_path, incremental) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        12, argtypes, args, nulls, false, 0);
 
     if (ret != SPI_OK_INSERT)
         ereport(ERROR,
@@ -215,13 +255,14 @@ Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
     char  nodes_path_buf[MAXPGPATH] = {0};
     char  edges_path_buf[MAXPGPATH] = {0};
     bool  is_live                   = false;
+    bool  is_incremental            = false;
 
     SPI_connect();
     {
         Oid   argtypes[1] = {TEXTOID};
         Datum args[1]     = {CStringGetTextDatum(name_str)};
         int   ret         = SPI_execute_with_args(
-            "SELECT live, file_path, nodes_file_path, edges_file_path "
+            "SELECT live, file_path, nodes_file_path, edges_file_path, incremental "
             "FROM age_gds.graphs WHERE name = $1",
             1, argtypes, args, nullptr, true, 1);
 
@@ -256,6 +297,9 @@ Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
         Datum d4 = SPI_getbinval(t, td, 4, &isnull);
         if (!isnull) strlcpy(edges_path_buf, TextDatumGetCString(d4),
                              sizeof(edges_path_buf));
+
+        Datum d5 = SPI_getbinval(t, td, 5, &isnull);
+        if (!isnull) is_incremental = DatumGetBool(d5);
     }
 
     if (is_live) {
@@ -316,7 +360,7 @@ Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
     SPI_finish();
 
     /* ---- Step 4: remove files ---- */
-    if (is_live) {
+    if (is_incremental) {
         if (nodes_path_buf[0] != '\0') (void) unlink(nodes_path_buf);
         if (edges_path_buf[0] != '\0') (void) unlink(edges_path_buf);
     } else {
@@ -344,10 +388,11 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
     SPI_connect();
 
     /* Columns: name(1), age_graph(2), node_count(3), edge_count(4),
-     *          directed(5), weighted(6), file_path(7), created_at(8), live(9) */
+     *          directed(5), weighted(6), file_path(7), created_at(8),
+     *          live(9), incremental(10) */
     int ret = SPI_execute(
         "SELECT name, age_graph, node_count, edge_count, "
-        "       directed, weighted, file_path, created_at, live "
+        "       directed, weighted, file_path, created_at, live, incremental "
         "FROM age_gds.graphs "
         "ORDER BY created_at",
         true, 0);
@@ -364,9 +409,10 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
         /* Return TABLE has 10 columns:
          *  1-8  from SPI (name..created_at)
          *  9    computed memoryUsage
-         * 10    live (SPI col 9) */
-        Datum values[10];
-        bool  isnull[10];
+         * 10    live (SPI col 9)
+         * 11    incremental (SPI col 10) */
+        Datum values[11];
+        bool  isnull[11];
         bool  is_null;
 
         /* Copy first 8 SPI columns */
@@ -386,6 +432,10 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
         /* live = SPI col 9 */
         values[9] = SPI_getbinval(spi_tup, spi_desc, 9, &is_null);
         isnull[9] = is_null;
+
+        /* incremental = SPI col 10 */
+        values[10] = SPI_getbinval(spi_tup, spi_desc, 10, &is_null);
+        isnull[10] = is_null;
 
         tuplestore_putvalues(tupstore, tupdesc, values, isnull);
     }

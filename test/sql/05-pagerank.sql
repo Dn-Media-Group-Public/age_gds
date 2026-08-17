@@ -45,4 +45,4 @@ SELECT * FROM age_gds.pageRank_stream(graph_name => 'no_such_graph');
 \set ON_ERROR_STOP on
 
 SELECT age_gds.graph_drop('people');
-DROP EXTENSION age_gds;
+DROP EXTENSION age_gds CASCADE;
