@@ -546,11 +546,17 @@ comment in both the SQL DDL and the C++ source.
 | `hits_stream`            | HITS (Kleinberg)    | `EigenvectorCentrality`      | Both auth and hub return the same eigenvector score; equivalent for undirected graphs |
 | `articleRank_stream`     | ArticleRank         | `PageRank` (damping=0.85)    | No distinct ArticleRank class in NetworKit |
 | `articulationPoints_stream` | Articulation points | `BiconnectedComponents`   | A node is an articulation point iff `getComponentsOfNode(u).size() > 1` |
-| `deltaStepping_stream`   | Delta-stepping SSSP | `Dijkstra`                   | NetworKit has no `DeltaStepping` class |
-| `bellmanFord_stream`     | Bellman-Ford SSSP   | `Dijkstra`                   | NetworKit's `AlgebraicBellmanFord<Matrix>` requires a matrix instantiation impractical to use here |
+| `deltaStepping_stream`   | Delta-stepping SSSP | `Dijkstra`                   | NetworKit has no `DeltaStepping` class (no `delta` parameter to add; tracked in `docs/neo4j-gds-parity-external-libs.md`, not a plan-03 item) |
 | `triangleCount_stream`   | Triangle count      | `LocalClusteringCoefficient` | Triangles computed as `round(lcc * deg * (deg-1) / 2)` |
-| `randomWalk_stream`      | Random walk         | `Aux::Random::choice` + `Graph::forNeighborsOf` | No `RandomWalk` class in NetworKit |
 | `betweenness_stream` (`sampling_size` set) | Approximate betweenness | `ApproxBetweenness` | `sampling_size` maps to `epsilon = 1/sqrt(sampling_size)`, fixed `delta = 0.1`; `sampling_seed` calls `Aux::Random::setSeed()` first. Requires an undirected graph — its diameter-estimation step does not support directed input (a NetworKit limitation, see `test/sql/12-centrality-parity.sql`) |
+| `maxFlow_stats`/`minCostMaxFlow_stats` (`alpha`) | Cost-scaling | *(unsupported)* | Not exposed by `SuccessiveShortestPathMinCostFlow`; documented gap, not a substitution |
+
+`bellmanFord_stream` and `randomWalk_stream` used to appear in this table
+(Dijkstra and hand-rolled `Aux::Random::choice` substitutions,
+respectively); both are now backed by real, purpose-built NetworKit classes
+(`AlgebraicBellmanFord<CSRMatrix>` and
+`NetworKit::Embedding::BiasedRandomWalk`) -- see the "Path-finding and flow
+algorithms" section below.
 
 See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 (added `ApproxBetweenness` as a new NetworKit dependency alongside the
@@ -567,6 +573,99 @@ existing exact `Betweenness`).
   turned into `ereport(ERROR, ...)`.
 
 See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
+
+---
+
+## Path-finding and flow algorithms (`src/algorithms/pathfinding.cpp`)
+
+Plan 03 added several new NetworKit dependencies to this file:
+`AlgebraicBellmanFord<CSRMatrix>` (real Bellman-Ford with negative-cycle
+detection, replacing the previous Dijkstra substitution), `AStar`/
+`AStarGeneral`/`STSP` (A* with a caller-supplied heuristic), `MultiTargetBFS`
+(multi-target unweighted shortest paths with built-in early termination),
+and `SuccessiveShortestPathMinCostFlow` (min-cost max-flow, reading capacity
+and supply/demand from named `Graph` attributes rather than constructor
+arguments).
+
+### `NetworKit::Embedding::BiasedRandomWalk`
+
+`randomWalk_stream` delegates to `NetworKit::Embedding::BiasedRandomWalk` --
+the same P/Q-biased ("return"/"in-out") walker that `NetworKit::Node2Vec`
+(used by `embedding.cpp`'s `node2vec_stream`) wraps internally. Node2Vec's
+*public*, installed header (`include/networkit/embedding/Node2Vec.hpp`) only
+exposes the trained embedding vectors via `getFeatures()`, not the
+underlying walks -- so it cannot serve `randomWalk_stream`, which needs the
+node sequences themselves.
+
+`BiasedRandomWalk.hpp`/`AliasSampler.hpp` live beside their own `.cpp` files
+in `third_party/networkit/networkit/cpp/embedding/` rather than under
+`third_party/networkit/include/networkit/` (NetworKit's public, installed
+header tree). They are still real NetworKit code from the pinned submodule,
+compiled into the same `networkit` static library `age_gds` already links
+against (confirmed via `nm` on the built library) -- CLAUDE.md forbids
+stubbing/aliasing NetworKit types, not using a header that happens to live
+under `cpp/` instead of `include/`. `CMakeLists.txt` adds that one directory
+to `age_gds`'s private include path with a comment explaining why.
+
+`BiasedRandomWalk::preprocessNode()` reads real edge weights via
+`Graph::forNeighborsOf`'s `weight` callback parameter, so
+`relationship_weight_property` (via `apply_weight_override()`, plan 00)
+works transparently.
+
+### Shared flow-graph transforms (`src/algorithms/flow_common.h`/`.cpp`)
+
+`maxFlow_stats` and `minCostMaxFlow_stats` both need to reduce a
+multi-source/multi-sink and/or node-capacity-constrained flow problem to the
+single-source/single-sink, edge-capacitated shape NetworKit's flow classes
+expect. Two graph *transformations* (not algorithms) are shared:
+
+- `augment_super_source_sink()` -- adds a super-source/super-sink node
+  connected to every requested source/sink via an edge capacity large
+  enough to never bottleneck a real path (a finite, safely-large value, not
+  `infinity()` -- `EdmondsKarp`'s arithmetic produces `NaN` on true
+  infinite capacities).
+- `split_node_capacities()` -- splits every node `u` into `(u_in, u_out)`
+  joined by an edge weighted at `u`'s capacity, so a node-capacity
+  constraint becomes an ordinary edge-capacity constraint before handing
+  the graph to `EdmondsKarp`/`Dinic`.
+
+`minCostMaxFlow_stats` needed a variant of the same node-splitting idea with
+cost (graph weight) and capacity (a named edge attribute) kept separate --
+implemented inline in that function rather than via
+`split_node_capacities()`, since the shared helper's node-capacity edges use
+graph *weight* as capacity (correct for `maxFlow_stats`, where
+`EdmondsKarp`/`Dinic` treat weight as capacity) which would collide with
+weight's "cost" meaning in the min-cost-flow context.
+
+### `shortestPath_dijkstra_stream` / `shortestPath_astar_stream` path shape
+
+Both return `(total_cost float8, node_ids bigint[], costs float8[])`, with
+`node_ids` including both the source and target node. The two underlying
+NetworKit base classes disagree on this by default:
+`SSSP::getPath()` (used by the Dijkstra-family functions) includes both
+endpoints; `STSP::getPath()` (used by `AStar`) explicitly excludes them.
+`shortestPath_astar_stream` manually prepends/appends the source/target to
+normalize to the same shape. `costs` is the cumulative edge-weight sum from
+source to each node in `node_ids`; for the Dijkstra-family functions this
+comes for free from the already-computed distance vector
+(`SSSP::distance()`), while `shortestPath_astar_stream` (whose `AStar`
+instance does not expose per-node distances, only the total) recomputes it
+by summing real edge weights along the returned path.
+
+### `allShortestPaths_dijkstra_stream`'s `target_nodes` deviation
+
+The plan suggested `NetworKit::MultiTargetDijkstra` for the `target_nodes`
+case, but that class's `STSP` base hardcodes `storePred = false` (no path
+reconstruction) for its multi-target constructor -- using it would silently
+drop the path output that is this function's entire reason for existing
+(as opposed to the older, distance-only `allShortestPaths_stream`).
+Instead, when `target_nodes` is given, the wrapper runs one
+`NetworKit::Dijkstra` per requested target (each with `storePaths = true`
+and that target passed as the early-stop `target` constructor argument) --
+still fully delegated to `NetworKit::Dijkstra`, just invoked once per
+requested target rather than once for the whole graph.
+
+See also: [Plan: Path-finding & Flow Algorithm Parity Fixes](implemented-plans/03-pathfinding-parity.md)
 
 ---
 

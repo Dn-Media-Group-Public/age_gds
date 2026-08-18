@@ -396,27 +396,49 @@ CREATE FUNCTION age_gds.modularity_stats(
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.bfs_stream(
-    graph_name  text   DEFAULT NULL,
-    source_node bigint DEFAULT NULL,
-    age_graph   text   DEFAULT NULL,
-    node_query  text   DEFAULT NULL,
-    edge_query  text   DEFAULT NULL
+    graph_name   text     DEFAULT NULL,
+    source_node  bigint   DEFAULT NULL,
+    age_graph    text     DEFAULT NULL,
+    node_query   text     DEFAULT NULL,
+    edge_query   text     DEFAULT NULL,
+    max_depth    integer  DEFAULT -1,
+    target_nodes bigint[] DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_bfs_stream'
     LANGUAGE C;
 
+-- BREAKING CHANGE (docs/implemented-plans/03-pathfinding-parity.md): this
+-- used to be single-source-to-all (nodeId, distance) rows. It now matches
+-- Neo4j's actual split -- single source/target pair, path output. See
+-- age_gds.allShortestPaths_dijkstra_stream for the single-source-to-all
+-- equivalent.
 CREATE FUNCTION age_gds.shortestPath_dijkstra_stream(
-    graph_name  text   DEFAULT NULL,
-    source_node bigint DEFAULT NULL,
-    age_graph   text   DEFAULT NULL,
-    node_query  text   DEFAULT NULL,
-    edge_query  text   DEFAULT NULL
-) RETURNS TABLE("nodeId" bigint, distance float8)
+    graph_name                    text   DEFAULT NULL,
+    source_node                   bigint DEFAULT NULL,
+    target_node                   bigint DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
+) RETURNS TABLE(total_cost float8, node_ids bigint[], costs float8[])
     AS 'age_gds', 'age_gds_shortestpath_dijkstra_stream'
     LANGUAGE C;
 
+CREATE FUNCTION age_gds.allShortestPaths_dijkstra_stream(
+    graph_name                    text     DEFAULT NULL,
+    source_node                   bigint   DEFAULT NULL,
+    age_graph                     text     DEFAULT NULL,
+    node_query                    text     DEFAULT NULL,
+    edge_query                    text     DEFAULT NULL,
+    relationship_weight_property  text     DEFAULT NULL,
+    target_nodes                  bigint[] DEFAULT NULL
+) RETURNS TABLE("targetNodeId" bigint, total_cost float8, node_ids bigint[], costs float8[])
+    AS 'age_gds', 'age_gds_allshortestpaths_dijkstra_stream'
+    LANGUAGE C;
+
 -- deltaStepping: NetworKit has no DeltaStepping class; Dijkstra used as
--- equivalent for non-negative weight graphs.
+-- equivalent for non-negative weight graphs. Excluded from plan 03 (no
+-- delta parameter to add -- tracked in docs/neo4j-gds-parity-external-libs.md).
 CREATE FUNCTION age_gds.deltaStepping_stream(
     graph_name  text   DEFAULT NULL,
     source_node bigint DEFAULT NULL,
@@ -427,67 +449,133 @@ CREATE FUNCTION age_gds.deltaStepping_stream(
     AS 'age_gds', 'age_gds_deltastepping_stream'
     LANGUAGE C;
 
--- bellmanFord: NetworKit has no standalone BellmanFord; Dijkstra fallback.
+-- bellmanFord: now backed by NetworKit::AlgebraicBellmanFord<CSRMatrix>
+-- (real Bellman-Ford, supports negative edge weights and reports
+-- negative-cycle presence) instead of the previous Dijkstra substitution.
 CREATE FUNCTION age_gds.bellmanFord_stream(
-    graph_name  text   DEFAULT NULL,
-    source_node bigint DEFAULT NULL,
-    age_graph   text   DEFAULT NULL,
-    node_query  text   DEFAULT NULL,
-    edge_query  text   DEFAULT NULL
-) RETURNS TABLE("nodeId" bigint, distance float8)
+    graph_name                    text   DEFAULT NULL,
+    source_node                   bigint DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, distance float8, "isNegativeCycle" boolean)
     AS 'age_gds', 'age_gds_bellmanford_stream'
     LANGUAGE C;
 
+CREATE FUNCTION age_gds.bellmanFord_stats(
+    graph_name                    text   DEFAULT NULL,
+    source_node                   bigint DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
+) RETURNS TABLE("containsNegativeCycle" boolean, "computeMillis" bigint)
+    AS 'age_gds', 'age_gds_bellmanford_stats'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.dfs_stream(
-    graph_name  text   DEFAULT NULL,
-    source_node bigint DEFAULT NULL,
-    age_graph   text   DEFAULT NULL,
-    node_query  text   DEFAULT NULL,
-    edge_query  text   DEFAULT NULL
+    graph_name   text     DEFAULT NULL,
+    source_node  bigint   DEFAULT NULL,
+    age_graph    text     DEFAULT NULL,
+    node_query   text     DEFAULT NULL,
+    edge_query   text     DEFAULT NULL,
+    max_depth    integer  DEFAULT -1,
+    target_nodes bigint[] DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, depth int)
     AS 'age_gds', 'age_gds_dfs_stream'
     LANGUAGE C;
 
--- randomWalk: NetworKit has no RandomWalk class; implemented using
--- Aux::Random::choice + NetworKit::Graph::forNeighborsOf.
+-- randomWalk: NetworKit has no RandomWalk class; delegates to
+-- NetworKit::Embedding::BiasedRandomWalk (the same P/Q-biased walker
+-- Node2Vec uses internally) instead of the previous uniform
+-- Aux::Random::choice implementation.
+--
+-- BREAKING CHANGE (docs/implemented-plans/03-pathfinding-parity.md):
+-- source_node -> source_nodes bigint[] (NULL = every node, matching
+-- Neo4j's default); walk_length default 10 -> 80 (matching Neo4j).
 CREATE FUNCTION age_gds.randomWalk_stream(
-    graph_name  text   DEFAULT NULL,
-    source_node bigint DEFAULT NULL,
-    walk_length int    DEFAULT 10,
-    age_graph   text   DEFAULT NULL,
-    node_query  text   DEFAULT NULL,
-    edge_query  text   DEFAULT NULL
-) RETURNS TABLE("nodeId" bigint)
+    graph_name                    text     DEFAULT NULL,
+    source_nodes                   bigint[] DEFAULT NULL,
+    walk_length                   int      DEFAULT 80,
+    age_graph                     text     DEFAULT NULL,
+    node_query                    text     DEFAULT NULL,
+    edge_query                    text     DEFAULT NULL,
+    walks_per_node                int      DEFAULT 10,
+    in_out_factor                 float8   DEFAULT 1.0,
+    return_factor                 float8   DEFAULT 1.0,
+    relationship_weight_property  text     DEFAULT NULL
+) RETURNS TABLE(walk_id bigint, "nodeId" bigint)
     AS 'age_gds', 'age_gds_randomwalk_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.spanningTree_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    objective                     text   DEFAULT 'minimum',
+    relationship_weight_property  text   DEFAULT NULL,
+    source_node                   bigint DEFAULT NULL
 ) RETURNS TABLE(src bigint, dst bigint, cost float8)
     AS 'age_gds', 'age_gds_spanningtree_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.allShortestPaths_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("sourceNodeId" bigint, "targetNodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_allshortestpaths_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.maxFlow_stats(
-    graph_name  text   DEFAULT NULL,
-    source_node bigint DEFAULT NULL,
-    target_node bigint DEFAULT NULL,
-    age_graph   text   DEFAULT NULL,
-    node_query  text   DEFAULT NULL,
-    edge_query  text   DEFAULT NULL
+    graph_name              text     DEFAULT NULL,
+    source_node             bigint   DEFAULT NULL,
+    target_node             bigint   DEFAULT NULL,
+    age_graph               text     DEFAULT NULL,
+    node_query              text     DEFAULT NULL,
+    edge_query              text     DEFAULT NULL,
+    capacity_property       text     DEFAULT NULL,
+    source_nodes            bigint[] DEFAULT NULL,
+    target_nodes            bigint[] DEFAULT NULL,
+    node_capacity_property  text     DEFAULT NULL
 ) RETURNS TABLE(flow float8, "computeMillis" bigint)
     AS 'age_gds', 'age_gds_maxflow_stats'
+    LANGUAGE C;
+
+-- gds.shortestPath.astar.stream: haversine-distance heuristic computed from
+-- latitude_property/longitude_property node properties.
+CREATE FUNCTION age_gds.shortestPath_astar_stream(
+    graph_name                    text   DEFAULT NULL,
+    source_node                   bigint DEFAULT NULL,
+    target_node                   bigint DEFAULT NULL,
+    latitude_property             text   DEFAULT NULL,
+    longitude_property            text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
+) RETURNS TABLE(total_cost float8, node_ids bigint[], costs float8[])
+    AS 'age_gds', 'age_gds_shortestpath_astar_stream'
+    LANGUAGE C;
+
+-- gds.minCostMaxFlow: NetworKit::SuccessiveShortestPathMinCostFlow. `alpha`
+-- (cost-scaling) is not exposed by this class and is unsupported.
+CREATE FUNCTION age_gds.minCostMaxFlow_stats(
+    graph_name              text     DEFAULT NULL,
+    capacity_property       text     DEFAULT NULL,
+    cost_property           text     DEFAULT NULL,
+    source_nodes            bigint[] DEFAULT NULL,
+    target_nodes            bigint[] DEFAULT NULL,
+    age_graph               text     DEFAULT NULL,
+    node_query              text     DEFAULT NULL,
+    edge_query              text     DEFAULT NULL,
+    node_capacity_property  text     DEFAULT NULL
+) RETURNS TABLE(total_cost float8, "computeMillis" bigint)
+    AS 'age_gds', 'age_gds_mincostmaxflow_stats'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

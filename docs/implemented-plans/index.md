@@ -16,3 +16,4 @@ Listed in implementation order.
 - [Plan: Per-call Relationship Weight Plumbing](00-weight-plumbing.md)
 - [Plan: Centrality Algorithm Parity Fixes](01-centrality-parity.md)
 - [Plan: Community Detection Algorithm Parity Fixes](02-community-detection-parity.md)
+- [Plan: Path-finding & Flow Algorithm Parity Fixes](03-pathfinding-parity.md)

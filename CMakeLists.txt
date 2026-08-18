@@ -36,6 +36,7 @@ add_library(age_gds MODULE
     src/util/partition_post.cpp
     src/algorithms/centrality.cpp
     src/algorithms/community.cpp
+    src/algorithms/flow_common.cpp
     src/algorithms/pathfinding.cpp
     src/algorithms/similarity.cpp
     src/algorithms/linkprediction.cpp
@@ -49,6 +50,13 @@ target_include_directories(age_gds PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/networkit/extlibs/tlx
     ${CMAKE_SOURCE_DIR}/src/util
     ${CMAKE_SOURCE_DIR}/src/algorithms
+    # NetworKit::Embedding::BiasedRandomWalk (real NetworKit code from the
+    # pinned submodule, compiled into the `networkit` target we link
+    # against) lives beside its own .cpp in networkit/cpp/embedding/ rather
+    # than under include/networkit/ -- Node2Vec.hpp (the only public,
+    # installed header) doesn't expose the raw walks randomWalk_stream
+    # needs. See docs/architecture.md "Path-finding algorithms" section.
+    ${CMAKE_SOURCE_DIR}/third_party/networkit/networkit/cpp/embedding
 )
 
 # Link NetworKit and OpenMP

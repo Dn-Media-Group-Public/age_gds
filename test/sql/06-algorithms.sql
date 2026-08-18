@@ -97,7 +97,17 @@ SELECT count(*) FROM age_gds.bfs_stream(
 );
 -- expected: 4
 
-SELECT count(*) FROM age_gds.shortestPath_dijkstra_stream(
+-- shortestPath_dijkstra_stream is now single-pair, path-returning (see
+-- docs/implemented-plans/03-pathfinding-parity.md); use
+-- allShortestPaths_dijkstra_stream below for the single-source-to-all case.
+SELECT total_cost >= 0 FROM age_gds.shortestPath_dijkstra_stream(
+    graph_name  => 'people',
+    source_node => (SELECT src_id FROM source_node_tmp),
+    target_node => (SELECT "nodeId" FROM age_gds.pageRank_stream(graph_name => 'people') ORDER BY score ASC LIMIT 1)
+);
+-- expected: t
+
+SELECT count(*) FROM age_gds.allShortestPaths_dijkstra_stream(
     graph_name  => 'people',
     source_node => (SELECT src_id FROM source_node_tmp)
 );
@@ -127,10 +137,12 @@ SELECT count(*) >= 0 FROM age_gds.dfs_stream(
 );
 -- expected: t
 
+-- randomWalk_stream: source_node -> source_nodes bigint[] (see
+-- docs/implemented-plans/03-pathfinding-parity.md).
 SELECT count(*) >= 0 FROM age_gds.randomWalk_stream(
-    graph_name   => 'people',
-    source_node  => (SELECT src_id FROM source_node_tmp),
-    walk_length  => 10
+    graph_name    => 'people',
+    source_nodes  => ARRAY[(SELECT src_id FROM source_node_tmp)],
+    walk_length   => 10
 );
 -- expected: t
 
