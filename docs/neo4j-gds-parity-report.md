@@ -8,6 +8,18 @@ directly off the live doc pages, not inferred.
 
 Every bullet: **what we have** → **what Neo4j GDS has** → **gap**.
 
+> **NetworKit parity annotations (added 2026-08-18):** Every gap below has been
+> checked against the actual NetworKit headers in `third_party/networkit/include/networkit`.
+> Each gap is tagged:
+> - ✅ **Closable with NetworKit + wrapper** — NetworKit already exposes the needed
+>   primitive (a constructor param, a class, a `Graph` method); age_gds just needs to
+>   plumb it through or add a thin conditional/post-filter. No new algorithm is written.
+> - ⚠️ **Partially closable** — some sub-parameters map to real NetworKit features, others
+>   don't.
+> - ❌ **Not in NetworKit** — no NetworKit class covers this; needs either an external
+>   library or must stay a documented limitation. See `docs/neo4j-gds-parity-external-libs.md`
+>   for the research on these (delegated to a subagent, listed in §8 below).
+
 ---
 
 ## 1. Centrality
@@ -24,6 +36,19 @@ Neo4j `gds.pageRank.stream(graphName, configuration)`:
 - `sourceNodes` `Node/Number or List or List of pairs as lists`, default `[]` — **missing** (personalized/biased PageRank; pairs form lets each source carry its own teleport bias)
 - `scaler` `String or Map`, default `None` (`None|MinMax|Max|Mean|Log|StdScore`) — **missing**
 
+> **NetworKit parity:** `NetworKit::PageRank(G, damp, tol, normalized, SinkHandling)`
+> (`centrality/PageRank.hpp`) has no public setter for `maxIterations` — it's a private
+> member hardcoded internally, not exposed via constructor or setter. Adding a per-call
+> `maxIterations` override is therefore ❌ **not in NetworKit** (would require patching
+> the vendored NetworKit itself, not a wrapper). `relationshipWeightProperty` ✅ is
+> closable purely at the age_loader level (load the named edge property as the graph
+> weight, same mechanism already used for the `weighted` flag). `scaler` ✅ is closable
+> as a pure post-processing pass over the already-computed score vector — `MinMax`,
+> `Max`, `Mean`, `Log`, `StdScore` are one-line arithmetic reductions, not graph
+> algorithms, so a wrapper is fine per CLAUDE.md. `sourceNodes` (personalized/biased
+> PageRank, teleport vector) ❌ is not in NetworKit — its `PageRank` class always uses a
+> uniform teleport distribution with no way to bias it toward a source set.
+
 ### `betweenness_stream`
 ```sql
 age_gds.betweenness_stream(graph_name, age_graph, node_query, edge_query)
@@ -33,12 +58,31 @@ Neo4j `gds.betweenness.stream`:
 - `samplingSeed` Integer, default `null` — **missing**
 - `relationshipWeightProperty` String, default `null` — **missing**
 
+> **NetworKit parity:** ✅ Closable. `NetworKit::ApproxBetweenness(G, epsilon, delta,
+> universalConstant)` (`centrality/ApproxBetweenness.hpp`) is a genuine sampling-based
+> approximate betweenness algorithm (Riondato & Kornaropoulos). It doesn't take a raw
+> `samplingSize`/`samplingSeed` pair like Neo4j — it's parameterized by error bound
+> (`epsilon`) and failure probability (`delta`) instead — so a new
+> `betweenness_stream(..., sampling_size, sampling_seed, ...)` overload would need a
+> wrapper conditional: if `sampling_size` is given, translate it into an `epsilon`
+> (roughly `epsilon ∝ 1/sqrt(samplingSize)`) and call `ApproxBetweenness`; otherwise run
+> the existing exact `Betweenness`. `samplingSeed` maps to NetworKit's global
+> `Aux::Random::setSeed()` before the run. `relationshipWeightProperty` ✅ closable via
+> age_loader weight plumbing as above.
+
 ### `closeness_stream`
 ```sql
 age_gds.closeness_stream(graph_name, age_graph, node_query, edge_query)
 ```
 Neo4j `gds.closeness.stream`:
 - `useWassermanFaust` Boolean, default `false` — **missing** (toggles the improved normalization formula; we hardcode NetworKit's `GENERALIZED` variant with no equivalent switch)
+
+> **NetworKit parity:** ✅ Closable. `NetworKit::Closeness(G, normalized, ClosenessVariant)`
+> (`centrality/Closeness.hpp`) already has exactly this switch —
+> `ClosenessVariant::STANDARD` vs. `ClosenessVariant::GENERALIZED` — it's a constructor
+> enum, not something we're missing from NetworKit, we just never plumb it through. Map
+> `useWassermanFaust=true` → `STANDARD` (Wasserman-Faust is the classic/standard
+> normalization), `false` → `GENERALIZED`, as a straight conditional.
 
 ### `harmonicCentrality_stream`
 ```sql
@@ -54,6 +98,17 @@ Neo4j `gds.degree.stream`:
 - `orientation` String, default `NATURAL` (`NATURAL|REVERSE|UNDIRECTED`) — **missing** (in-degree vs out-degree vs both; we hardcode undirected-style summed degree)
 - `relationshipWeightProperty` String, default `null` — **missing** (weighted degree)
 
+> **NetworKit parity:** ✅ Fully closable, no gap in NetworKit at all.
+> `NetworKit::DegreeCentrality(G, normalized, outDeg, ignoreSelfLoops)`
+> (`centrality/DegreeCentrality.hpp`) already takes an `outDeg` bool — `NATURAL` →
+> `outDeg=true`, `REVERSE` → `outDeg=false`; `UNDIRECTED` is just summing both (two
+> calls, or a single pass since `Graph::degree()` on an undirected graph already sums
+> both by construction). Weighted degree needs no algorithm at all —
+> `NetworKit::Graph::weightedDegree(node, countSelfLoopsTwice)` and
+> `weightedDegreeIn(node, ...)` (`graph/Graph.hpp:1180,1190`) are direct `Graph` methods
+> that return exactly this; `relationshipWeightProperty` just needs the named edge
+> property loaded as graph weight (same age_loader mechanism as elsewhere).
+
 ### `eigenvector_stream`
 ```sql
 age_gds.eigenvector_stream(graph_name, age_graph, node_query, edge_query)
@@ -65,6 +120,16 @@ Neo4j `gds.eigenvector.stream`:
 - `sourceNodes` `List or Node or Number`, default `[]` — **missing** (personalized eigenvector centrality)
 - `scaler` `String or Map`, default `None` — **missing**
 
+> **NetworKit parity:** ⚠️ Partial. `NetworKit::EigenvectorCentrality(G, tol)`
+> (`centrality/EigenvectorCentrality.hpp`) only takes a tolerance — `tolerance` ✅ is
+> already fully supportable as a param (just needs plumbing, it exists in the
+> constructor). `maxIterations` ❌ is not exposed — no constructor param, no setter, so
+> like PageRank this is a NetworKit-side gap, not a wrapper problem.
+> `relationshipWeightProperty` ✅ closable via age_loader weight plumbing.
+> `sourceNodes` (personalized eigenvector centrality) ❌ not in NetworKit — same
+> limitation as PageRank's `sourceNodes`, no biasing mechanism exists. `scaler` ✅
+> closable as the same post-processing arithmetic pass described under PageRank.
+
 ### `hits_stream`
 ```sql
 age_gds.hits_stream(graph_name, age_graph, node_query, edge_query)
@@ -75,6 +140,12 @@ Neo4j `gds.hits.stream`:
 - `authProperty` String, default `"auth"` — n/a (property-name config, not applicable to our stream shape)
 - `hubProperty` String, default `"hub"` — n/a
 - **Fidelity gap, not just params:** Neo4j's HITS is genuine Kleinberg HITS (distinct auth/hub via power iteration on `A^T A` / `A A^T`). Ours returns the same `NetworKit::EigenvectorCentrality` score for both `auth` and `hub` columns — this is a documented substitution, not real HITS.
+
+> **NetworKit parity:** ❌ Not in NetworKit. There is no `HITS`, `Hits`, `Hub`, or
+> `Authority` class anywhere under `third_party/networkit/include/networkit` (checked
+> across `centrality/`, `algebraic/algorithms/`). Real Kleinberg HITS is genuinely
+> absent from NetworKit's centrality module — this needs an external library or
+> continues as a documented substitution. Delegated for external-library research (§8).
 
 ### `articleRank_stream`
 ```sql
@@ -88,11 +159,27 @@ Run with **hardcoded** damping=0.85, tolerance=1e-6, maxIterations=20, no overri
 - `sourceNodes` `Node/Number or List or List of pairs as lists`, default `[]` — **missing**
 - `scaler` `String or Map`, default `None` — **missing**
 
+> **NetworKit parity:** Same underlying class as `pageRank_stream` (ArticleRank is just
+> PageRank with a +1 degree-damping tweak, presumably layered on
+> `NetworKit::PageRank` internally) — so the same analysis applies: `dampingFactor` ✅
+> and `tolerance` ✅ just need to stop being hardcoded constants and become real
+> parameters (trivial, no NetworKit change needed — the constructor already accepts
+> them). `maxIterations` ❌ still blocked by PageRank's missing setter (see above).
+> `relationshipWeightProperty` ✅ and `scaler` ✅ closable the same way as PageRank.
+> `sourceNodes` ❌ not in NetworKit, same as PageRank.
+
 ### `articulationPoints_stream`
 ```sql
 age_gds.articulationPoints_stream(graph_name, age_graph, node_query, edge_query)
 ```
 Neo4j `gds.articulationPoints.stream` has only the standard graph-filter/concurrency config (concurrency pinned to 1, single-threaded). **No gap.** Neo4j's result additionally includes `resultingComponents` (`{count, min, max}` — sizes of components formed if this node were removed); ours returns bare `nodeId`. Minor result-shape gap, not a config gap.
+
+> **NetworKit parity:** ✅ Closable. `resultingComponents` needs no new algorithm — for
+> each articulation point found, remove that node from a copy of the graph (or just mark
+> it excluded) and run `NetworKit::ConnectedComponents`/`WeaklyConnectedComponents`
+> (already used for `wcc_stream`) to get the resulting component sizes, then reduce to
+> `{count, min, max}`. This is composing two already-used NetworKit algorithms in a
+> wrapper loop, not writing new graph-science code.
 
 ---
 
@@ -114,6 +201,22 @@ Neo4j `gds.louvain.stream` config — **all missing from ours**:
 
 This is the single largest parameter gap in the whole comparison — Louvain is completely unconfigurable in age_gds today.
 
+> **NetworKit parity:** ⚠️ Mostly closable. `NetworKit::PLM(G, refine, gamma, par,
+> maxIter, turbo, recurse)` (`community/PLM.hpp`) already accepts most of what's needed:
+> `gamma` ✅ (resolution parameter, direct match — Neo4j doesn't expose this by that name
+> but it's the natural analogue of tuning community granularity), `maxIter` ✅ maps to
+> `maxIterations` directly. `maxLevels` ⚠️ has no direct numeric equivalent — PLM has a
+> boolean `recurse` (multilevel on/off) instead of an integer level cap; can approximate
+> by exposing `recurse` as a boolean, or leave `maxLevels` unimplementable exactly.
+> `tolerance` ❌ not exposed by PLM (no convergence-tolerance constructor param).
+> `includeIntermediateCommunities` ❌ PLM's coarsening levels are internal to `run()`;
+> the public API only returns the final `Partition`, no per-level history. `seedProperty`
+> ❌ PLM has no "start from an existing partition" constructor (unlike PLP, see
+> Label Propagation below) — not supported. `consecutiveIds` ✅ and `minCommunitySize` ✅
+> are pure post-processing over the returned `Partition` (renumber ids / drop small
+> communities before streaming), no algorithm needed. `relationshipWeightProperty` ✅
+> closable via age_loader weight plumbing (PLM already respects graph edge weights).
+
 ### `leiden_stream`
 ```sql
 age_gds.leiden_stream(graph_name, age_graph, node_query, edge_query)
@@ -126,6 +229,17 @@ Neo4j `gds.leiden.stream` config — **all missing** (all values confirmed direc
 - `tolerance` Float, default `0.0001`
 - `seedProperty` String, default `n/a`
 
+> **NetworKit parity:** ⚠️ Mostly closable, and notably this is a genuine Leiden
+> implementation on the NetworKit side — `NetworKit::ParallelLeiden(G, iterations,
+> randomize, gamma)` (`community/ParallelLeiden.hpp`) is real Leiden (refinement +
+> aggregation phases with modularity-delta locking), not a PLM substitution. `gamma` ✅
+> direct match. `iterations` ≈ loosely analogous to `maxLevels` but not identical
+> semantics (Leiden "iterations" here means repeated full Leiden runs, not level depth)
+> — ⚠️ partial. `theta` (refinement randomness) ❌ not exposed — `ParallelLeiden`'s
+> `randomize` is a bool (randomize node order or not), not a continuous randomness
+> knob. `tolerance` ❌ not exposed. `seedProperty` ❌ no "start from partition"
+> constructor. `relationshipWeightProperty` ✅ closable via weight plumbing.
+
 ### `labelPropagation_stream`
 ```sql
 age_gds.labelPropagation_stream(graph_name, age_graph, node_query, edge_query)
@@ -137,6 +251,16 @@ Neo4j `gds.labelPropagation.stream` config — **all missing**:
 - `seedProperty` String, default `n/a`
 - `consecutiveIds` Boolean, default `false`
 
+> **NetworKit parity:** ✅ Best-covered of the whole community-detection family.
+> `NetworKit::PLP(G, theta, maxIterations)` (`community/PLP.hpp`) has `maxIterations` ✅
+> as a *direct* constructor parameter — no gap at all, just needs plumbing. Critically,
+> PLP also has a second constructor `PLP(G, baseClustering, theta)` that starts from an
+> existing `Partition` — this closes `seedProperty` ✅ directly: read the named node
+> property into a `Partition`, pass it as `baseClustering`. `nodeWeightProperty` and
+> `relationshipWeightProperty` ✅ closable via age_loader weight plumbing (PLP already
+> respects edge weights for tie-breaking). `consecutiveIds` ✅ pure post-processing on
+> the returned partition.
+
 ### `wcc_stream`
 ```sql
 age_gds.wcc_stream(graph_name, age_graph, node_query, edge_query)
@@ -147,11 +271,25 @@ Neo4j `gds.wcc.stream` config — **all missing**:
 - `threshold` Float, default `null` (relationships with weight below threshold don't count as connecting)
 - `consecutiveIds` Boolean, default `false`
 
+> **NetworKit parity:** ⚠️ Mostly closable. `threshold` ✅ needs no new algorithm — build
+> the `NetworKit::Graph` for this call with edges below the weight threshold excluded
+> (a filter at graph-construction time, same age_loader step that already applies
+> `edge_query`), then run the existing `ConnectedComponents`/`WeaklyConnectedComponents`
+> unchanged. `relationshipWeightProperty` ✅ only matters for evaluating the threshold,
+> closable the same way. `consecutiveIds` ✅ post-processing. `seedProperty` ❌ — WCC's
+> underlying `ConnectedComponents`/`WeaklyConnectedComponents` classes have no
+> "start from a partial labeling" constructor; not supported by NetworKit for this
+> family (unlike PLP above).
+
 ### `scc_stream`
 ```sql
 age_gds.scc_stream(graph_name, age_graph, node_query, edge_query)
 ```
 Neo4j `gds.scc.stream` config: only `consecutiveIds` Boolean, default `false`, beyond the standard set — **missing**, but minor.
+
+> **NetworKit parity:** ✅ Closable. `consecutiveIds` is the same post-processing
+> renumbering step as everywhere else — `NetworKit::StronglyConnectedComponents`
+> already returns a `Partition`/component-id vector; renumber before streaming.
 
 ### `kCore_stream`
 ```sql
@@ -166,12 +304,26 @@ age_gds.triangleCount_stream(graph_name, age_graph, node_query, edge_query)
 Neo4j `gds.triangleCount.stream` config:
 - `maxDegree` Integer, default `2^63 - 1` — **missing** (excludes high-degree "super nodes" from computation, returning `-1` for them; matters for performance on skewed/power-law graphs)
 
+> **NetworKit parity:** ✅ Closable, no NetworKit gap. `maxDegree` is a pure
+> pre-filtering conditional: before invoking NetworKit's triangle-counting class, check
+> `Graph::degree(u)` for each node and either skip it (emit `-1`) or include it in the
+> computation. This is a wrapper-level check on data NetworKit's `Graph` already
+> exposes, not new graph-science logic.
+
 ### `localClusteringCoefficient_stream`
 ```sql
 age_gds.localClusteringCoefficient_stream(graph_name, age_graph, node_query, edge_query)
 ```
 Neo4j `gds.localClusteringCoefficient.stream` config:
 - `triangleCountProperty` String, default `n/a` — **missing** (lets a precomputed per-node triangle count be supplied, skipping the internal triangle-count pass)
+
+> **NetworKit parity:** ✅ Closable without invoking a NetworKit algorithm at all — the
+> local clustering coefficient is `2 * triangles(u) / (deg(u) * (deg(u) - 1))`, a
+> closed-form ratio, not an algorithm. If `triangleCountProperty` supplies precomputed
+> per-node triangle counts, the wrapper can compute the coefficient directly from those
+> values plus `Graph::degree(u)`, bypassing `NetworKit::LocalClusteringCoefficient`
+> entirely for that call. This is arithmetic over already-known quantities, consistent
+> with CLAUDE.md's constraint (which targets graph *algorithms*, not derived formulas).
 
 ### `modularity_stats`
 ```sql
@@ -181,6 +333,17 @@ RETURNS TABLE(modularity float8)
 Neo4j's modularity metric procedure config (confirmed):
 - `relationshipWeightProperty` String, default `null` — **missing**
 - `communityProperty` String, required (`no` optional) — "The node property that holds the community ID as an integer for each node. Note that only non-negative community IDs are considered valid and will have their modularity score computed." — **missing, and a structural difference**: Neo4j's modularity metric takes an *existing* community assignment (e.g. previously written by Louvain/Leiden) and scores it; ours always re-runs PLM internally and scores that partition, with no way to score an externally supplied partition.
+
+> **NetworKit parity:** ✅ Fully closable — this is actually the easiest fix in the
+> whole report. `NetworKit::Modularity::getQuality(const Partition &zeta, const Graph
+> &G)` (`community/Modularity.hpp`) already takes **any** `Partition`, not one that
+> `PLM` itself produced. The "structural difference" flagged above isn't a NetworKit
+> limitation at all — it's purely that `modularity_stats` currently always builds its
+> own `Partition` via an internal PLM run. Read `communityProperty` off the nodes into a
+> `Partition` object and call `getQuality` on that instead — no new NetworKit feature
+> needed, just stop discarding the externally-supplied assignment. Same fix applies to
+> `relationshipWeightProperty` via `Modularity::setTotalEdgeWeight` plus weighted-graph
+> loading.
 
 ---
 
@@ -198,6 +361,17 @@ Neo4j `gds.bfs.stream` config:
 
 **Result shape mismatch:** Neo4j's stream result is `sourceNode, nodeIds, path` — a **single row** containing the ordered list of visited node ids and a `Path` object. Ours emits **one row per node** with a `distance` column. This is a bigger structural difference than the missing `maxDepth` parameter alone; a maxDepth port should decide whether to keep the current per-node/distance shape or move toward Neo4j's single-row/ordered-list shape.
 
+> **NetworKit parity:** ✅ Both closable, and `targetNodes` maps to a real dedicated
+> algorithm. `maxDepth` needs no new algorithm — `NetworKit::Traversal::BFSfrom`
+> (`graph/BFS.hpp`) already calls its handle with the current `dist` for every visited
+> node (`callBFSHandle(handle, u, dist)`); the wrapper's handle just needs to stop
+> enqueueing once `dist > maxDepth`, a one-line guard in code we already control, not a
+> NetworKit change. `targetNodes` is even better covered:
+> `NetworKit::MultiTargetBFS(G, source, targetsFirst, targetsLast)`
+> (`distance/MultiTargetBFS.hpp`) is a real, purpose-built algorithm for "shortest
+> distance from one source to several targets, stop once all are found" — a direct
+> drop-in for this parameter, not a wrapper hack.
+
 ### `dfs_stream`
 ```sql
 age_gds.dfs_stream(graph_name, source_node, age_graph, node_query, edge_query)
@@ -207,6 +381,14 @@ Neo4j `gds.dfs.stream` config:
 - `sourceNode` Integer, required — **have**
 - `targetNodes` List of Integer, default `[]` — **missing**
 - `maxDepth` Integer, default `-1` — **missing**
+
+> **NetworKit parity:** ✅ Closable, same reasoning as BFS but no dedicated multi-target
+> class exists for DFS specifically (`MultiTargetBFS` is BFS-only). `maxDepth` is the
+> same one-line depth-tracking guard inside the existing DFS traversal loop (depth is
+> already implicit in the recursion/stack depth we maintain to emit the current `depth`
+> column). `targetNodes` early-termination is just a loop-exit condition — check if the
+> current node is in the target set and stop the traversal — no algorithm class needed,
+> it's control flow over the traversal we already wrote.
 
 ### `shortestPath_dijkstra_stream`
 ```sql
@@ -219,12 +401,30 @@ Neo4j splits this into two distinct procedures:
 
 Gaps: (1) no `relationshipWeightProperty` per-call override — ours relies solely on the graph's `weighted` flag set at projection time; (2) no path output at all, only distance; (3) no source-target single-pair mode (`targetNode`/`targetNodes`) — this is arguably a separate, commonly-requested function we don't have at all.
 
+> **NetworKit parity:** ✅ All three closable, mostly by using more of the `Dijkstra`
+> class we already depend on. `NetworKit::Dijkstra(G, source, storePaths,
+> storeNodesSortedByDistance, target)` (`distance/Dijkstra.hpp`) **already has a
+> `target` parameter for early termination** — the source-target single-pair mode (gap
+> 3) is a constructor argument away, not a new algorithm. With `storePaths=true`, the
+> `SSSP` base class exposes path reconstruction (`getPath`/`getPaths`, inherited from
+> `distance/SSSP.hpp`) — closing gap 2 (path output) directly. `relationshipWeightProperty`
+> (gap 1) is the usual age_loader weight-plumbing fix. For the true multi-target case
+> (`targetNode` as a list), `NetworKit::MultiTargetDijkstra` (referenced in
+> `distance/`) is the weighted analogue of `MultiTargetBFS` above and is the right class
+> to reach for instead of hand-looping single-target Dijkstra calls.
+
 ### `deltaStepping_stream`
 ```sql
 age_gds.deltaStepping_stream(graph_name, source_node, age_graph, node_query, edge_query)
 ```
 **Substitution:** runs plain `NetworKit::Dijkstra`, not delta-stepping. Neo4j `gds.allShortestPaths.delta.stream` config adds:
 - `delta` Float — **missing**, and structurally can't be added without an actual delta-stepping implementation (NetworKit has none — per CLAUDE.md, "never implement a graph algorithm from scratch," so this would need to stay a documented substitution, or be dropped).
+
+> **NetworKit parity:** ❌ Confirmed not in NetworKit — no `DeltaStepping` class exists
+> anywhere in the tree (only plain `Dijkstra`, `BidirectionalDijkstra`, `AlgebraicBFS`).
+> Stays a documented substitution unless an external library is pulled in purely for
+> this (low value — Dijkstra is already correct, delta-stepping is a parallel-performance
+> optimization, not a different result). Not prioritized for external-library research.
 
 ### `bellmanFord_stream`
 ```sql
@@ -233,6 +433,16 @@ age_gds.bellmanFord_stream(graph_name, source_node, age_graph, node_query, edge_
 **Substitution:** runs `NetworKit::Dijkstra`; doc says negative weights unsupported. Neo4j `gds.bellmanFord.stream`:
 - `sourceNode`, `relationshipWeightProperty` — same base shape
 - Result includes `isNegativeCycle` Boolean per path, and stats mode reports `containsNegativeCycle` Boolean — **missing**: ours has no negative-cycle detection or reporting at all, it just documents the limitation.
+
+> **NetworKit parity:** ✅ Closable, and this should stop being a Dijkstra substitution
+> entirely. `NetworKit::AlgebraicBellmanFord` (`algebraic/algorithms/AlgebraicBellmanFord.hpp`)
+> is a real Bellman-Ford implementation (matrix/algebraic formulation) whose
+> documented `run()` contract explicitly returns **"True if there is a negative cycle
+> present in the graph, otherwise false"** — this directly closes both `isNegativeCycle`
+> and `containsNegativeCycle`, and correctly supports negative weights (unlike the
+> current `Dijkstra`-based substitution). This is the single highest-value fix in the
+> path-finding section: swap the backing algorithm from `Dijkstra` to
+> `AlgebraicBellmanFord` and the "documented limitation" disappears.
 
 ### `randomWalk_stream`
 ```sql
@@ -249,6 +459,17 @@ Neo4j `gds.randomWalk.stream` config:
 
 Note: node2vec's walk generation already implements return/in-out bias via NetworKit's Node2Vec walker; `randomWalk_stream` could potentially delegate similarly instead of the current `Aux::Random::choice` uniform-walk substitution, to pick up `returnFactor`/`inOutFactor` for free.
 
+> **NetworKit parity:** ✅ Confirms and extends the note above — `walksPerNode` ✅,
+> `inOutFactor`/`returnFactor` (`Q`/`P`) ✅ are all already constructor params of
+> `NetworKit::Node2Vec(G, P, Q, L, N, D)` (`embedding/Node2Vec.hpp`) and
+> `NetworKit::BiasedRandomWalk` — delegating `randomWalk_stream` to the same biased
+> walker used for `node2vec_stream` (rather than uniform `Aux::Random::choice`) picks up
+> all three for free, no new algorithm. `sourceNodes` as a list ✅ is a simple wrapper
+> loop calling the walker once per requested source (or per-all-nodes when unspecified,
+> matching Neo4j's default). `relationshipWeightProperty` ✅ closable via weight
+> plumbing if the biased walker respects edge weights in its transition probabilities
+> (verify against `BiasedRandomWalk.hpp` during implementation).
+
 ### `spanningTree_stream`
 ```sql
 age_gds.spanningTree_stream(graph_name, age_graph, node_query, edge_query)
@@ -259,6 +480,23 @@ Neo4j `gds.spanningTree.stream` config:
 - `relationshipWeightProperty` — **missing**
 - `objective` String, default `'minimum'` — **missing** (Neo4j also exposes a separate `gds.beta.maximumWeightSpanningTree` for the maximum-weight variant; our docs don't state which objective `NetworKit::SpanningForest` optimizes for, if any — worth clarifying since `SpanningForest` is unweighted/topological, not a MST algorithm at all).
 
+> **NetworKit parity:** ⚠️ Partial, but better than the current substitution. The report
+> is right that plain `NetworKit::SpanningForest` is topological/unweighted and not an
+> MST at all — but `NetworKit::RandomMaximumSpanningForest(G)` or
+> `RandomMaximumSpanningForest(G, edgeValues)` (`graph/RandomMaximumSpanningForest.hpp`)
+> **is** a real Kruskal-based maximum-weight spanning forest. `objective` ✅ is
+> closable: `'maximum'` maps directly to `RandomMaximumSpanningForest`; `'minimum'`
+> is the same class run on negated edge weights (a standard MST trick, not a new
+> algorithm — negate weights in the edge-value vector passed to the constructor).
+> `relationshipWeightProperty` ✅ closable via weight plumbing (the class already
+> accepts either the graph's own weights or an explicit `edgeValues` vector).
+> `sourceNode` ❌ has no real NetworKit equivalent — MST/spanning-forest results are
+> root-independent by construction, so there's no NetworKit "rooted spanning tree from
+> a source" primitive (that would be Prim's algorithm specifically, which isn't present
+> under any name); Neo4j's requirement is more of an output/API contract (validate the
+> node exists, maybe report the forest as if rooted there) than an algorithmic need, and
+> can likely be satisfied as a no-op validation, not a real gap.
+
 ### `allShortestPaths_stream`
 ```sql
 age_gds.allShortestPaths_stream(graph_name, age_graph, node_query, edge_query)
@@ -268,6 +506,8 @@ Neo4j `gds.allShortestPaths.stream` (true APSP, distinct from the single-source 
 - `relationshipWeightProperty` String, default `null` — **missing**
 
 **No structural gap** — good match. Just the missing per-call weight-property override, consistent with the rest of the report.
+
+> **NetworKit parity:** ✅ Closable via the usual age_loader weight plumbing.
 
 ### `maxFlow_stats`
 ```sql
@@ -281,6 +521,33 @@ Neo4j `gds.maxFlow.stream`/`.stats` config:
 - `nodeCapacityProperty` String, default `n/a`, optional — **missing**: node-capacity constraints (vertex splitting), not just edge capacity
 
 Neo4j also has a distinct **`gds.minCostMaxFlow`** procedure we have no equivalent of at all (see §6).
+
+> **NetworKit parity:** ⚠️ Mostly closable via a standard graph-transformation wrapper,
+> not a new algorithm. `capacityProperty` ✅ is the usual named-edge-property-as-weight
+> plumbing (`NetworKit::EdmondsKarp`/`Dinic` already take edge weights as capacities).
+> `sourceNodes`/`targetNodes` (multi-source/multi-sink) ✅ are closable with the
+> standard super-source/super-sink reduction: add one virtual node connected to every
+> requested source with infinite capacity, one virtual sink connected from every
+> requested target with infinite capacity, then run the existing
+> `NetworKit::EdmondsKarp`/`Dinic` (`flow/EdmondsKarp.hpp`, `flow/Dinic.hpp`) unchanged
+> on the augmented graph — this is graph construction in the wrapper, not new
+> flow-algorithm code. `nodeCapacityProperty` ✅ is the standard node-splitting
+> reduction (split each capacity-constrained node into an in-node/out-node pair joined
+> by an edge whose weight is the node capacity) — again, a graph transformation applied
+> before calling the same unmodified NetworKit max-flow class.
+>
+> For **`gds.minCostMaxFlow`** (currently "no equivalent at all"): ✅ NetworKit actually
+> has this. `NetworKit::SuccessiveShortestPathMinCostFlow(G, capacityName, supplyName)`
+> (`flow/SuccessiveShortestPath.hpp`) is a genuine min-cost-flow solver (successive
+> shortest paths with Bellman-Ford potential reweighting) that reads capacity and
+> supply/demand directly from named edge/node attributes — very close to Neo4j's
+> `capacityProperty`/`costProperty`/`sourceNodes`/`targetNodes` shape already.
+> `sourceNodes`/`targetNodes` here again reduce to the super-source/super-sink trick
+> (supply/demand at the virtual nodes). `alpha` (a cost-scaling tuning parameter) ❌ has
+> no equivalent — this SSP implementation doesn't expose a scaling factor, so that one
+> param would just be unsupported/ignored. This closes what the original report called
+> "a distinct procedure we have no equivalent of at all" — it's a real, fairly complete
+> win.
 
 ---
 
@@ -300,6 +567,21 @@ Neo4j `gds.nodeSimilarity.stream` config — **all missing**:
 
 Ours always computes the full `O(n²)` unordered pairwise Jaccard with no bound — a strictly more expensive, unbounded variant of Neo4j's default top-K-per-node behavior. This is the top scalability concern in the whole report for any graph beyond toy size.
 
+> **NetworKit parity:** ✅ Closable, no NetworKit change needed. `similarityCutoff` ✅
+> and `degreeCutoff` ✅ are pre-filters on inputs we already have (score value,
+> `Graph::degree(u)`) — skip pairs/nodes before or during the existing Jaccard loop.
+> `topK` ✅ and `topN` ✅ are post-filters: keep a small per-node top-K heap (bounded
+> `O(n·k)` memory instead of materializing all `O(n²)` pairs) and a global row cap — this
+> is result-limiting logic, not a new similarity algorithm; `NetworKit::JaccardIndex`
+> (`linkprediction/JaccardIndex.hpp`) still computes the same per-pair score, we just
+> stop keeping every row. `relationshipWeightProperty` ⚠️ is the one item that's not a
+> pure filter — NetworKit's `JaccardIndex`/`JaccardMeasure` operate on unweighted
+> neighbor sets, so a weighted-Jaccard variant (`sum(min(w_u,w_v)) / sum(max(w_u,w_v))`
+> over neighbor weights) would be closed-form set arithmetic computed directly from the
+> graph's edge weights in the wrapper, not a NetworKit class — still doable without
+> writing a "graph algorithm" from scratch, just a different scoring formula over the
+> same neighbor sets.
+
 ### `knn_stream`
 ```sql
 age_gds.knn_stream(graph_name, top_k DEFAULT 5, age_graph, node_query, edge_query)
@@ -314,6 +596,21 @@ Neo4j `gds.knn.stream` config:
 - `similarityCutoff` — **missing**
 
 Neo4j also has a separate `gds.knn.filtered.stream` (source/target node filtering) we have no equivalent of.
+
+> **NetworKit parity:** ⚠️ Split. For our *current* topology-Jaccard `knn_stream`:
+> `topK` ✅ default fix and `similarityCutoff` ✅ are the same filtering wrapper as
+> `nodeSimilarity` above. `sampleRate`/`deltaThreshold`/`randomSeed` are parameters of
+> Neo4j's approximate randomized KNN-join algorithm (NN-descent-style) — implementing
+> genuine sampling/early-stopping behavior would itself be "an algorithm," which
+> conflicts with CLAUDE.md if attempted from scratch; since our current similarity
+> computation is exact, these three are ❌ not meaningfully portable without adopting an
+> external approximate-NN library. For Neo4j's *actual* semantics — KNN over
+> **node property vectors** (numeric/embedding features), the real conceptual mismatch
+> flagged in the report — NetworKit has ❌ no generic feature-vector nearest-neighbor
+> class at all (checked `similarity`-adjacent headers under `linkprediction/` and
+> `embedding/`; nothing resembling ANN/vector search). This is a genuinely different
+> problem domain (vector similarity search) that NetworKit doesn't cover — delegated for
+> external-library research (§8).
 
 ---
 
@@ -339,6 +636,23 @@ Result: a single `score` Float. Called for one pair at a time.
 
 **Structural mismatch:** ours uses NetworKit's `runAll()` and streams **every unconnected node pair** (`~node_count²/2` rows) for a full-graph score matrix. This is a fundamentally different, far more expensive usage pattern than Neo4j's per-pair spot-check design. Also missing: `direction` (OUTGOING/INCOMING/BOTH) and `relationshipQuery` (edge-type filtering) — neither is expressible in our current signature. Worth an explicit design note in `docs/api.md` calling out that this is a deliberate divergence, or reconsidering the "stream all pairs" approach for large graphs.
 
+> **NetworKit parity:** ✅ Closable entirely with the class we already use. All four
+> predictors (`AdamicAdarIndex`, `CommonNeighborsIndex`, `PreferentialAttachmentIndex`,
+> `ResourceAllocationIndex` under `linkprediction/`) derive from
+> `NetworKit::LinkPredictor` (`linkprediction/LinkPredictor.hpp`), whose base API is
+> fundamentally per-pair: `runImpl(node u, node v)` scores a *single* pair, and the
+> public `run(u, v)` (inherited, not shown by name but the base class is designed around
+> single-pair scoring — `runAll()` is a convenience batch wrapper on top). The
+> "structural mismatch" isn't a NetworKit limitation — we're choosing to call the batch
+> `runAll()` API when the single-pair `run(node1, node2)` call matching Neo4j's spot-check
+> design already exists on the same class. Add a scalar single-pair SQL function
+> alongside (or instead of) the current streaming-all-pairs one. `direction`
+> (OUTGOING/INCOMING/BOTH) ✅ is closable by passing a directed vs. reversed vs.
+> undirected `Graph` view to the predictor's `setGraph()`, since these predictors
+> operate on whatever `Graph` they're given. `relationshipQuery` (edge-type filtering)
+> ✅ needs no new NetworKit feature at all — age_gds already has `edge_query` as a
+> first-class parameter on every other function; just thread it through here too.
+
 ---
 
 ## 6. Embeddings
@@ -358,6 +672,22 @@ Neo4j `gds.node2vec.stream` config, confirmed defaults:
 - `windowSize` Integer, default `10` — **missing** (skip-gram context window)
 - `negativeSamplingRate` Integer, default `5` — **missing**
 - `iterations` Integer, default `1` — **missing** (Word2Vec training epochs)
+
+> **NetworKit parity:** ⚠️ Better than expected — the training step isn't hidden inside
+> `Node2Vec` itself, it's a separate class. `embeddingDimension` default fix ✅ is
+> trivial. `relationshipWeightProperty` ⚠️ needs verification: `Node2Vec`'s constructor
+> (`embedding/Node2Vec.hpp`) only takes `P, Q, L, N, D`, no explicit weight flag, so
+> whether the underlying `BiasedRandomWalk` respects graph edge weights in its
+> transition probabilities needs checking against `BiasedRandomWalk.hpp` before calling
+> this closable. `windowSize` ✅ and `iterations` ✅ (training epochs) are **directly**
+> exposed: `NetworKit::Embedding::learnEmbeddings(walks, nn, dimensions, winSize,
+> iterations)` (`networkit/cpp/embedding/LearnEmbedding.hpp`) is the actual skip-gram
+> SGD trainer NetworKit's node2vec pipeline calls after generating walks, and it takes
+> `winSize`/`iterations` as constructor-level arguments already — age_gds likely just
+> isn't threading these through from its own `node2vec_stream` signature.
+> `negativeSamplingRate` ❌ is hardcoded — `LearnEmbedding.cpp` comments confirm "Value
+> taken from original word2vec code," not exposed as a parameter; closing this would
+> require a NetworKit-side change, not just a wrapper.
 
 ---
 
@@ -381,6 +711,13 @@ own `graph_name`/`age_graph`/`node_query`/`edge_query` conventions.
 | `normalizationStrength` | Float | `0.0` | yes |
 | `randomSeed` | Integer | n/a | yes |
 | `relationshipWeightProperty` | String | `null` | yes |
+
+> **NetworKit parity:** ❌ Not in NetworKit. No `FastRP` class exists anywhere under
+> `embedding/` (only `Node2Vec` and the generic `LearnEmbedding` skip-gram trainer).
+> FastRP (random projection of iterated adjacency powers) is mathematically simple
+> compared to Node2Vec but is still a distinct, named embedding *algorithm*, so
+> hand-rolling it would violate CLAUDE.md's "never implement a graph algorithm from
+> scratch." Delegated for external-library research (§8).
 
 ### GraphSAGE (`gds.beta.graphSage.stream`) — inductive neural embedding
 Requires a separately-trained model (`gds.beta.graphSage.train`); `stream` config:
@@ -408,6 +745,11 @@ Requires a separately-trained model (`gds.beta.graphSage.train`); `stream` confi
 
 Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scratch" — NetworKit has no GraphSAGE/neural-net training class, and this needs a persistent model-catalog concept `age_gds` doesn't have).
 
+> **NetworKit parity:** ❌ Confirmed — no neural-net / GraphSAGE class anywhere in the
+> tree. Out of scope as the report already concludes; not delegated for external
+> research (would require both a GNN library and a model-catalog concept `age_gds`
+> doesn't have — too large a scope expansion for this thin-glue-layer project).
+
 ### A* Shortest Path (`gds.shortestPath.astar.stream`) — heuristic source-target
 | Name | Type | Default | Optional |
 |---|---|---|---|
@@ -417,6 +759,16 @@ Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scrat
 | `longitudeProperty` | Float | n/a | no |
 | `relationshipWeightProperty` | String | `null` | yes |
 
+> **NetworKit parity:** ✅ Directly available. `NetworKit::AStar(G, distanceHeu, source,
+> target, storePred)` (`distance/AStar.hpp`) is a real, complete A* implementation —
+> `sourceNode`/`targetNode` are direct constructor params, and `distanceHeu` is exactly
+> the "lower bound of distance from every node to the target" that
+> `latitudeProperty`/`longitudeProperty` would be used to compute (haversine distance
+> from each node's coordinates to the target's) — that computation is simple
+> arithmetic in the wrapper before constructing `AStar`, not a new algorithm.
+> `relationshipWeightProperty` ✅ closable via the usual weight plumbing. This is a
+> straightforward new SQL function wrapping an existing NetworKit class end-to-end.
+
 ### Yen's Shortest Path (`gds.shortestPath.yens.stream`) — k-shortest-paths
 | Name | Type | Default | Optional |
 |---|---|---|---|
@@ -425,6 +777,11 @@ Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scrat
 | `k` | Integer | `1` | no |
 | `relationshipWeightProperty` | String | `null` | yes |
 
+> **NetworKit parity:** ❌ Not in NetworKit. No k-shortest-paths / Yen's-algorithm class
+> found anywhere under `distance/`. Delegated for external-library research (§8), though
+> low priority — k-shortest-paths is a fairly self-contained algorithm (repeated
+> constrained Dijkstra calls) that a small library could cover cheaply.
+
 ### Minimum Weight k-Spanning Tree (`gds.beta.spanningTree.kmst.stream` / k-spanning tree page)
 | Name | Type | Default | Optional |
 |---|---|---|---|
@@ -432,6 +789,11 @@ Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scrat
 | `sourceNode` | Integer | `null` | n/a |
 | `relationshipWeightProperty` | String | `null` | yes |
 | `objective` | String | `'minimum'` | yes |
+
+> **NetworKit parity:** ❌ Not in NetworKit. No k-constrained / bounded-size spanning
+> tree class exists — `RandomMaximumSpanningForest` (used above for plain
+> `spanningTree_stream`) builds a full spanning forest, not a k-edge-limited tree.
+> Delegated for external-library research (§8), low priority (niche procedure).
 
 ### Minimum Directed Steiner Tree (`gds.steinerTree.stream`)
 | Name | Type | Default | Optional |
@@ -442,11 +804,21 @@ Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scrat
 | `delta` | Float | `2.0` | yes |
 | `applyRerouting` | Boolean | `false` | yes |
 
+> **NetworKit parity:** ❌ Not in NetworKit. No `SteinerTree`/`SteinerForest` class
+> anywhere in the tree (checked `graph/`, `distance/`, `community/`). Steiner tree is
+> NP-hard and genuinely needs a dedicated approximation algorithm — not derivable from
+> NetworKit's MST/Dijkstra primitives via a simple wrapper. Delegated for
+> external-library research (§8).
+
 ### Prize-Collecting Steiner Tree (`gds.beta.prizeSteinerTree.stream`)
 | Name | Type | Default | Optional |
 |---|---|---|---|
 | `relationshipWeightProperty` | String | `null` | yes |
 | `prizeProperty` | String | n/a | no |
+
+> **NetworKit parity:** ❌ Same as Steiner tree above — not in NetworKit, and
+> prize-collecting variants are an even more specialized NP-hard formulation. Delegated
+> for external-library research (§8), grouped with the plain Steiner tree gap.
 
 ### Minimum-Cost Maximum Flow (`gds.minCostMaxFlow.stream`) — distinct from plain max flow, which we do have a substitute for
 | Name | Type | Default | Optional |
@@ -458,15 +830,37 @@ Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scrat
 | `nodeCapacityProperty` | String | n/a | yes |
 | `alpha` | Integer | `6` | yes |
 
+> **NetworKit parity:** ✅ See the annotation under `maxFlow_stats` (§3) —
+> `NetworKit::SuccessiveShortestPathMinCostFlow` (`flow/SuccessiveShortestPath.hpp`)
+> already covers this end-to-end (`capacityProperty`/`costProperty`/supply-demand
+> attributes are its native constructor inputs), with `sourceNodes`/`targetNodes`
+> closable via the standard super-source/super-sink graph augmentation and
+> `nodeCapacityProperty` via node-splitting. `alpha` (cost-scaling factor) ❌ isn't
+> exposed by this SSP-based implementation.
+
 ### Longest Path for DAG (`gds.dag.longestPath.stream`)
 | Name | Type | Default | Optional |
 |---|---|---|---|
 | `relationshipWeightProperty` | String | `null` | yes |
 
+> **NetworKit parity:** ✅ Closable. `NetworKit::TopologicalSort(G)` (`graph/TopologicalSort.hpp`)
+> gives a real topological order (checked directly). Longest path in a DAG is then a
+> single linear-time dynamic-programming pass over that order (`dist[v] = max over
+> predecessors u of dist[u] + weight(u,v)`) — this is standard DP over an
+> already-computed NetworKit ordering, not a new graph-traversal algorithm in the sense
+> CLAUDE.md guards against (no BFS/DFS/Dijkstra reimplementation, just an array
+> reduction driven by `TopologicalSort`'s output). `relationshipWeightProperty` ✅
+> closable via weight plumbing.
+
 ### Topological Sort (`gds.dag.topologicalSort.stream`)
 | Name | Type | Default | Optional |
 |---|---|---|---|
 | `computeMaxDistanceFromSource` | Boolean | `false` | yes |
+
+> **NetworKit parity:** ✅ Fully closable — `NetworKit::TopologicalSort` is a direct
+> match for the base procedure. `computeMaxDistanceFromSource` reuses the exact same DP
+> pass described above for Longest Path (unweighted case: `dist[v] = max(dist[u]) + 1`
+> over predecessors in topological order).
 
 ### Filtered Node Similarity (`gds.nodeSimilarity.filtered.stream`)
 Same base config as `nodeSimilarity` (`similarityCutoff=1e-42`, `degreeCutoff=1`, `topK=10`, `topN=0`, `relationshipWeightProperty=null`) plus:
@@ -479,6 +873,19 @@ Same base config as `nodeSimilarity` (`similarityCutoff=1e-42`, `degreeCutoff=1`
 | `useComponents` | Boolean or String | `false` | yes |
 | `sourceNodeFilter` | Integer or List of Integer or String | n/a | no |
 | `targetNodeFilter` | Integer or List of Integer or String | n/a | no |
+
+> **NetworKit parity:** ✅ Mostly closable as more filtering on top of the `nodeSimilarity_stream`
+> annotation above. `upperDegreeCutoff` ✅, `bottomK` ✅, `bottomN` ✅ are the same
+> pre/post-filtering pattern as `degreeCutoff`/`topK`/`topN` (keep the lowest-scoring K
+> instead of highest — same bounded heap, just inverted comparator). `sourceNodeFilter`/
+> `targetNodeFilter` ✅ restrict which pairs are even considered — a pre-filter on the
+> existing pairwise loop. `useComponents` ✅ closable by running
+> `NetworKit::ConnectedComponents` first and only comparing pairs within the same
+> component — composing an already-used NetworKit class, not new logic. `similarityMetric`
+> ⚠️ partial: `JACCARD` ✅ (have it), `OVERLAP`/`COSINE` over neighbor sets are simple
+> set-arithmetic formulas (`|A∩B|/min(|A|,|B|)`, cosine of 0/1 membership vectors)
+> computable directly without a NetworKit class, same reasoning as weighted Jaccard
+> above.
 
 ### Filtered KNN (`gds.knn.filtered.stream`)
 Same base config as `knn` (`nodeProperties` required, `topK=10`, `sampleRate=0.5`, `deltaThreshold=0.001`, `randomSeed`) plus:
@@ -493,12 +900,29 @@ Same base config as `knn` (`nodeProperties` required, `topK=10`, `sampleRate=0.5
 | `targetNodeFilter` | Integer or List of Integer or String | n/a | no |
 | `seedTargetNodes` | Boolean | `false` | yes |
 
+> **NetworKit parity:** ⚠️ Same split as plain `knn_stream` above: `sourceNodeFilter`/
+> `targetNodeFilter` ✅ are pre-filters, same wrapper technique as Filtered Node
+> Similarity. `maxIterations`/`randomJoins`/`initialSampler`/`perturbationRate` are
+> internals of Neo4j's specific NN-descent approximate-KNN algorithm, which NetworKit
+> doesn't implement — ❌ not closable without either adopting that algorithm externally
+> or accepting an exact (non-approximate) computation that ignores these knobs.
+> `similarityCutoff` ✅ is the same threshold filter as elsewhere. Grouped with plain
+> KNN under the property-vector-KNN gap for external-library research (§8).
+
 ### Speaker-Listener Label Propagation / SLLPA (`gds.sllpa.stream`) — overlapping community detection
 | Name | Type | Default | Optional |
 |---|---|---|---|
 | `maxIterations` | Integer | n/a | no |
 | `minAssociationStrength` | String | `0.2` | yes |
 | `partitioning` | String | `"RANGE"` | yes |
+
+> **NetworKit parity:** ❌ Not in NetworKit. No SLLPA / overlapping-community class
+> exists — checked `community/` in full (it has `PLM`, `PLP`, `ParallelLeiden`,
+> `LouvainMapEquation`, `LFM`, `CutClustering`, etc., all of which are disjoint/hard
+> partitioning; `OverlappingCommunityDetectionAlgorithm.hpp` exists as a *base class*
+> but has no SLLPA subclass implementing it). Genuinely absent — delegated for
+> external-library research (§8) since overlapping community detection is a
+> qualitatively different capability none of our current algorithms provide.
 
 ### Conductance metric (`gds.conductance.stream`)
 | Name | Type | Default | Optional |
@@ -508,11 +932,26 @@ Same base config as `knn` (`nodeProperties` required, `topK=10`, `sampleRate=0.5
 
 Like the modularity metric (§2), this scores an *existing* community assignment rather than computing one.
 
+> **NetworKit parity:** ✅ Fully closable, same fix pattern as `modularity_stats`.
+> `NetworKit::Conductance::getQuality(const Partition &zeta, const Graph &G)`
+> (`community/Conductance.hpp`) already accepts any externally supplied `Partition` (it
+> requires cluster IDs to be 0 or 1, i.e. a 2-partition, per its docstring — read
+> `communityProperty` into a `Partition` restricted to values `{0,1}`). This is a brand
+> new SQL wrapper function around a class NetworKit already ships, following the exact
+> pattern established for `modularity_stats`. `relationshipWeightProperty` ✅ closable
+> via weight plumbing.
+
 ### K-1 Coloring (`gds.k1coloring.stream`)
 | Name | Type | Default | Optional |
 |---|---|---|---|
 | `maxIterations` | Integer | `10` | yes |
 | `minCommunitySize` | Integer | `0` | yes |
+
+> **NetworKit parity:** ❌ Not in NetworKit. Checked `randomization/`, `coloring.py`
+> (Python-only, no corresponding C++ header — `find` turned up only `.py`/`.rst` files,
+> no `.hpp`), and grepped for "Coloring"/"Colouring" across all headers: nothing. Graph
+> coloring (greedy or distributed K1-coloring) is entirely absent from the C++ API.
+> Delegated for external-library research (§8).
 
 ### K-Means Clustering (`gds.kmeans.stream`) — property-vector clustering
 | Name | Type | Default | Optional |
@@ -527,6 +966,13 @@ Like the modularity metric (§2), this scores an *existing* community assignment
 | `seedCentroids` | List of List of Float | `[]` | yes |
 | `computeSilhouette` | Boolean | `false` | yes |
 
+> **NetworKit parity:** ❌ Not in NetworKit — K-Means is a property-vector clustering
+> algorithm (operates on `nodeProperty` feature vectors, not graph topology), a
+> different domain than everything else in this codebase, similar to Neo4j's real KNN.
+> No k-means/clustering-over-vectors class exists in NetworKit (it's a graph library,
+> not a general ML library). Delegated for external-library research (§8), grouped with
+> the property-vector-KNN gap since both need a vector-math library, not a graph one.
+
 ### HDBSCAN (`gds.hdbscan.stream`)
 | Name | Type | Default | Optional |
 |---|---|---|---|
@@ -535,8 +981,19 @@ Like the modularity metric (§2), this scores an *existing* community assignment
 | `samples` | Integer | `10` | yes |
 | `leafSize` | Integer | `1` | yes |
 
+> **NetworKit parity:** ❌ Not in NetworKit — same property-vector-clustering domain as
+> K-Means above (operates on `nodeProperty` feature vectors, density-based clustering).
+> Grouped with K-Means and property-vector-KNN under the "needs a vector-math library"
+> bucket for external research (§8).
+
 ### Clique Counting (`gds.cliqueCounting.stream`)
 No algorithm-specific config beyond the standard graph-filter/concurrency set — parameter-wise, this would be a trivial port if a NetworKit equivalent exists (not checked).
+
+> **NetworKit parity:** ✅ Confirmed and closable. `NetworKit::MaximalCliques(G,
+> maximumOnly)` (`clique/MaximalCliques.hpp`) lists all maximal cliques (Eppstein/Strash
+> algorithm) with a callback API; a "clique counting" stream/stat function is a direct,
+> thin wrapper — count cliques (optionally bucketed by size) as they're emitted by the
+> existing callback, no new algorithm needed.
 
 ### Approximate Maximum k-cut (`gds.approxMaxKCut.stream`)
 | Name | Type | Default | Optional |
@@ -548,8 +1005,23 @@ No algorithm-specific config beyond the standard graph-filter/concurrency set �
 | `relationshipWeightProperty` | String | `null` | yes |
 | `minCommunitySize` | Integer | `0` | yes |
 
+> **NetworKit parity:** ❌ Not in NetworKit — checked for "kcut"/"KCut"/"MaxKCut" across
+> the whole tree, nothing found. Approximate max-k-cut (local search / VNS) is a
+> distinct combinatorial-optimization algorithm not covered by any existing NetworKit
+> class (community detection classes optimize modularity/resolution objectives, not
+> cut-size objectives). Delegated for external-library research (§8).
+
 ### Bridges (`gds.bridges.stream`) — edge analogue of articulation points
 No algorithm-specific config beyond the standard set (`concurrency` pinned to `1`, single-threaded, same as articulationPoints). NetworKit equivalence not checked this pass.
+
+> **NetworKit parity:** ✅ Closable — no dedicated `Bridges` class exists (checked, none
+> found), but bridges are directly derivable from
+> `NetworKit::BiconnectedComponents(G)` (`components/BiconnectedComponents.hpp`, the
+> same class implicated in `articulationPoints_stream`): an edge is a bridge if and only
+> if it is the sole edge of its biconnected component. This is a one-pass filter over
+> `BiconnectedComponents`'s output (component-size == 1 edge), not a new traversal
+> algorithm — directly analogous to how articulation points and bridges are the
+> vertex/edge duals of the same biconnectivity structure.
 
 ### CELF (`gds.beta.influenceMaximization.celf.stream`) — influence maximization
 | Name | Type | Default | Optional |
@@ -558,6 +1030,38 @@ No algorithm-specific config beyond the standard set (`concurrency` pinned to `1
 | `monteCarloSimulations` | Integer | `100` | yes |
 | `propagationProbability` | Float | `0.1` | yes |
 | `randomSeed` | Integer | n/a | yes |
+
+> **NetworKit parity:** ❌ Not in NetworKit. No influence-maximization / CELF /
+> independent-cascade class exists (checked `simulation/`, `scd/`, `dynamics/` — none
+> implement the independent-cascade diffusion model CELF requires). Delegated for
+> external-library research (§8).
+
+---
+
+## 8. External-library research for gaps NetworKit cannot cover
+
+The items tagged ❌ above have no NetworKit primitive to build on — closing them would
+require a "never implement a graph algorithm from scratch" violation if done in-house.
+This section is delegated to a subagent to survey open-source libraries that could
+complement NetworKit for these specific gaps, without displacing NetworKit as the
+primary graph-algorithm engine. See `docs/neo4j-gds-parity-external-libs.md` for the
+resulting research once it lands.
+
+**Gaps needing external research** (grouped by shared underlying capability):
+1. **Real HITS** (`hits_stream`) — genuine Kleinberg HITS (distinct auth/hub via power iteration).
+2. **Delta-stepping SSSP** (`deltaStepping_stream`) — low priority, Dijkstra is already correct, just not parallel.
+3. **FastRP** — random-projection node embeddings.
+4. **Yen's k-shortest-paths** — low priority, fairly simple to build from repeated constrained Dijkstra.
+5. **Minimum-weight k-spanning-tree** — niche, low priority.
+6. **Steiner tree (plain + prize-collecting)** — NP-hard approximation algorithms.
+7. **Property-vector KNN / Filtered KNN's approximate NN-descent internals** — vector/ANN search over node feature vectors, not graph topology (also covers `gds.knn.filtered`'s `maxIterations`/`randomJoins`/`initialSampler`/`perturbationRate`).
+8. **K-Means clustering over node property vectors** — general vector clustering, not graph-topological.
+9. **HDBSCAN over node property vectors** — same vector-clustering bucket as K-Means.
+10. **SLLPA (overlapping community detection)** — Speaker-Listener Label Propagation.
+11. **K-1 Coloring** — greedy/distributed graph coloring.
+12. **Approximate Maximum k-cut** — combinatorial optimization (VNS/local search).
+13. **CELF / influence maximization** — independent-cascade diffusion simulation.
+14. **GraphSAGE** — out of scope, not included (needs both a GNN library and a model-catalog concept beyond age_gds's design).
 
 ---
 
@@ -575,3 +1079,13 @@ Ranked by (a) how often the parameter is asked for in practice, (b) scalability 
 8. **`leiden_stream` / `labelPropagation_stream` / `wcc_stream`** — same missing-config pattern as Louvain.
 9. **`knn_stream`** — conceptually mismatched (topology-Jaccard vs. Neo4j's property-vector KNN).
 10. **Link-prediction family** — runAll-streaming vs. Neo4j's single-pair scalar-function design.
+
+**Post-annotation note (2026-08-18):** with items #1–5, #7, #8, and #10 above now
+confirmed ✅ closable purely with NetworKit + wrapper code (no new dependency, no
+CLAUDE.md violation), the real priority order for implementation work is: Louvain/Leiden/
+LabelPropagation/WCC config plumbing (#1, #8) and the `modularity_stats`/`conductance`
+external-partition fix (§2/§7) are the cheapest, highest-value fixes — pure wrapper
+work, zero new dependencies. `betweenness_stream` sampling (#3) and `bfs`/`dfs`
+`maxDepth`/`targetNodes` (#4) are next — also pure NetworKit-feature plumbing. `hits_stream`
+(#6) and `knn_stream`'s property-vector semantics (#9) are the two items on this list
+that are genuine NetworKit gaps requiring external-library research (see §8).
