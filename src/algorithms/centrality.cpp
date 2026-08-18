@@ -36,13 +36,15 @@ extern "C" {
 #include "catalog/session_cache.h"
 #include "util/config_parser.h"
 #include "util/srf_helper.h"
+#include "util/weight_override.h"
 
 /* ---------------------------------------------------------------- helpers */
 
 // Helper: extract graph (from cache or anonymous) + PageRank config.
 // pageRank arg layout:
 //   0=graph_name, 1=damping_factor, 2=max_iterations, 3=tolerance,
-//   4=config, 5=age_graph, 6=node_query, 7=edge_query
+//   4=config, 5=age_graph, 6=node_query, 7=edge_query,
+//   8=weight_property (relationship_weight_property)
 static GraphHandle get_args(
     FunctionCallInfo fcinfo,
     PageRankConfig  *cfg_out)
@@ -66,7 +68,11 @@ static GraphHandle get_args(
     const char *agraph = PG_ARGISNULL(5) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(5));
     const char *nq     = PG_ARGISNULL(6) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(6));
     const char *eq     = PG_ARGISNULL(7) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(7));
-    return get_or_load_graph(gname, agraph, nq, eq);
+    const char *wprop  = PG_ARGISNULL(8) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(8));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
+    return gh;
 }
 
 // Helper: resolve graph for simple 1-arg functions.

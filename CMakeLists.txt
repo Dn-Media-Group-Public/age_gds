@@ -31,6 +31,7 @@ add_library(age_gds MODULE
     src/util/config_parser.cpp
     src/util/srf_helper.cpp
     src/util/writeback.cpp
+    src/util/weight_override.cpp
     src/algorithms/centrality.cpp
     src/algorithms/community.cpp
     src/algorithms/pathfinding.cpp

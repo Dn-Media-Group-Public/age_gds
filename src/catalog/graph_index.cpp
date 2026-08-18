@@ -444,9 +444,9 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
 
     /* Insert catalog row */
     {
-        Oid   argtypes[8] = {TEXTOID, TEXTOID, INT8OID, INT8OID,
-                              BOOLOID, BOOLOID, TEXTOID, TEXTOID};
-        Datum args[8]     = {
+        Oid   argtypes[9] = {TEXTOID, TEXTOID, INT8OID, INT8OID,
+                              BOOLOID, BOOLOID, TEXTOID, TEXTOID, TEXTOID};
+        Datum args[9]     = {
             CStringGetTextDatum(name_str),
             CStringGetTextDatum(age_graph_str),
             Int64GetDatum(node_count),
@@ -454,14 +454,15 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
             BoolGetDatum(directed),
             BoolGetDatum(weighted),
             CStringGetTextDatum(nodes_path),
-            CStringGetTextDatum(edges_path)
+            CStringGetTextDatum(edges_path),
+            CStringGetTextDatum(edge_q)
         };
         int ret = SPI_execute_with_args(
             "INSERT INTO age_gds.graphs "
             "(name, age_graph, node_count, edge_count, directed, weighted, "
-            " live, incremental, nodes_file_path, edges_file_path) "
-            "VALUES ($1, $2, $3, $4, $5, $6, true, true, $7, $8)",
-            8, argtypes, args, nullptr, false, 0);
+            " live, incremental, nodes_file_path, edges_file_path, edge_query) "
+            "VALUES ($1, $2, $3, $4, $5, $6, true, true, $7, $8, $9)",
+            9, argtypes, args, nullptr, false, 0);
         if (ret != SPI_OK_INSERT)
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),

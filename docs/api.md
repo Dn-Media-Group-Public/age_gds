@@ -22,6 +22,39 @@ Supplying neither raises
 In the anonymous mode, `node_query` and `edge_query` are both required;
 omitting either raises an error.
 
+### Relationship weight override (`weight_property` / `relationship_weight_property`)
+
+Some algorithm functions accept a trailing `relationship_weight_property text
+DEFAULT NULL` parameter (Neo4j GDS's `relationshipWeightProperty`
+convention), letting a single call use a different AGE edge property as the
+graph weight than whatever the graph was projected/loaded with. See
+[Plan: Per-call relationship weight plumbing](implemented-plans/00-weight-plumbing.md)
+for the full design.
+
+- **Anonymous mode** (`age_graph`/`node_query`/`edge_query`): there is no
+  dedicated override parameter, and none is needed — write the desired
+  property directly into your own `edge_query`'s `weight` column
+  (`... RETURN id(a) AS src, id(b) AS dst, r.<property> AS weight`), and pass
+  `weighted := true`.
+- **Named/cached graph mode** (`graph_name`): pass
+  `relationship_weight_property => '<property>'`. Internally this re-runs the
+  projection's stored `edge_query` against AGE for that property and applies
+  the result to a private, reweighted copy of the cached graph for the
+  duration of the call — the shared cache entry and every other backend's
+  view of it are unaffected. Requires the query convention above
+  (`RETURN id(a) AS src, id(b) AS dst, <expr> AS weight`, with a single
+  relationship alias bound in the `MATCH` clause); raises an error if the
+  named graph's catalog row has no recorded `edge_query` to substitute into
+  (e.g. very old rows projected before this convention existed).
+- `NULL` (the default) is always a no-op: the call behaves exactly as if the
+  parameter were omitted.
+
+Currently available on: `pageRank_stream`, `pageRank_stats`. Other
+algorithms adopt the same trailing parameter as their own plans are
+implemented.
+
+See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md)
+
 ### nodeId values
 
 All `nodeId` / `node1` / `node2` / `sourceNodeId` / `targetNodeId` columns
@@ -324,14 +357,15 @@ All centrality functions return one row per node in the graph.
 
 ```sql
 age_gds.pageRank_stream(
-    graph_name     text   DEFAULT NULL,
-    damping_factor float8 DEFAULT NULL,
-    max_iterations int    DEFAULT NULL,
-    tolerance      float8 DEFAULT NULL,
-    config         jsonb  DEFAULT NULL,
-    age_graph      text   DEFAULT NULL,
-    node_query     text   DEFAULT NULL,
-    edge_query     text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    damping_factor                float8 DEFAULT NULL,
+    max_iterations                int    DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    config                        jsonb  DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
@@ -343,6 +377,10 @@ Computes PageRank scores. Delegates to `NetworKit::PageRank`.
 - `tolerance` — convergence threshold, default `1e-7`.
 - `config` — JSONB object; accepted keys: `"dampingFactor"`, `"maxIterations"`,
   `"tolerance"`. Named parameters override JSONB values when both are present.
+- `relationship_weight_property` — see
+  [Relationship weight override](#relationship-weight-override-weight_property--relationship_weight_property)
+  above. Only meaningful with `graph_name` (named/cached graphs); ignored (via
+  `apply_weight_override`'s anonymous-mode no-op) when using `age_graph`.
 
 Scores sum to approximately 1.0. All scores are non-negative.
 
@@ -354,14 +392,15 @@ Scores sum to approximately 1.0. All scores are non-negative.
 
 ```sql
 age_gds.pageRank_stats(
-    graph_name     text   DEFAULT NULL,
-    damping_factor float8 DEFAULT NULL,
-    max_iterations int    DEFAULT NULL,
-    tolerance      float8 DEFAULT NULL,
-    config         jsonb  DEFAULT NULL,
-    age_graph      text   DEFAULT NULL,
-    node_query     text   DEFAULT NULL,
-    edge_query     text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    damping_factor                float8 DEFAULT NULL,
+    max_iterations                int    DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    config                        jsonb  DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE(
     "ranIterations" int,
     "didConverge"   bool,
@@ -374,6 +413,9 @@ age_gds.pageRank_stats(
 
 Runs PageRank and returns a single summary row instead of per-node scores.
 `didConverge` is `true` when `ranIterations < max_iterations`.
+
+`relationship_weight_property` behaves identically to `pageRank_stream` (see
+above).
 
 **NetworKit class:** `NetworKit::PageRank`
 

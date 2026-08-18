@@ -156,27 +156,29 @@ CREATE TRIGGER age_gds_label_watch
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.pageRank_stream(
-    graph_name     text   DEFAULT NULL,
-    damping_factor float8 DEFAULT NULL,
-    max_iterations int    DEFAULT NULL,
-    tolerance      float8 DEFAULT NULL,
-    config         jsonb  DEFAULT NULL,
-    age_graph      text   DEFAULT NULL,
-    node_query     text   DEFAULT NULL,
-    edge_query     text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    damping_factor                float8 DEFAULT NULL,
+    max_iterations                int    DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    config                        jsonb  DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_pagerank_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.pageRank_stats(
-    graph_name     text   DEFAULT NULL,
-    damping_factor float8 DEFAULT NULL,
-    max_iterations int    DEFAULT NULL,
-    tolerance      float8 DEFAULT NULL,
-    config         jsonb  DEFAULT NULL,
-    age_graph      text   DEFAULT NULL,
-    node_query     text   DEFAULT NULL,
-    edge_query     text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    damping_factor                float8 DEFAULT NULL,
+    max_iterations                int    DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    config                        jsonb  DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("ranIterations" int, "didConverge" bool, "computeMillis" bigint,
                 "minScore" float8, "maxScore" float8, "meanScore" float8)
     AS 'age_gds', 'age_gds_pagerank_stats'

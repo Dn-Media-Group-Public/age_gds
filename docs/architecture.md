@@ -317,6 +317,79 @@ See also: [Plan 10: Cross-Backend Cache Invalidation](implemented-plans/10-snaps
 
 ---
 
+## Per-call weight override
+
+Weight is normally decided once, at projection time, by the `weighted` flag
+passed to `graph_project`/`graph_index`/`age_load_graph`. Many Neo4j GDS
+procedures accept a per-call `relationshipWeightProperty` that lets a single
+invocation pick a different edge property as the weight, without
+re-projecting. `weight_property`/`relationship_weight_property` implements
+this convention for age_gds — see
+[Plan: Per-call relationship weight plumbing](implemented-plans/00-weight-plumbing.md).
+
+The two execution paths satisfy the convention differently:
+
+- **Anonymous execution** (`age_graph`/`node_query`/`edge_query` supplied
+  directly): no special mechanism exists or is needed. The caller already
+  controls the weight column by writing the desired property expression into
+  their own `edge_query`'s `weight` column (`... RETURN id(a) AS src, id(b)
+  AS dst, r.<property> AS weight`). `apply_weight_override()`
+  (`src/util/weight_override.h`/`.cpp`) is a no-op on an anonymous
+  `GraphHandle` (`gh.owned.has_value()`).
+
+- **Named/cached graph** (`graph_name` resolves through `session_cache_get`):
+  the topology was projected once and cached, so there is no per-call
+  opportunity to change the weight source without an explicit mechanism.
+  `apply_weight_override(GraphHandle &gh, const char *weight_property)`:
+  1. No-ops if `weight_property` is `NULL`, or if `gh` is anonymous (see
+     above).
+  2. Otherwise calls `reweight_from_property()` (`src/bridge/age_loader.h`/
+     `.cpp`), which re-runs the *stored* `edge_query` for the projection
+     (recorded in `age_gds.graphs.edge_query` at `graph_project`/
+     `graph_index` time, exposed on the cached `ProjectedGraph` as
+     `age_graph`/`edge_query`) against AGE via SPI, but with the query's
+     final `RETURN` projection substituted to select `weight_property`
+     instead of whatever expression the original query used. The
+     relationship alias is extracted from the query's `MATCH` clause (the
+     `-[alias...]->` pattern) so the substitution reads
+     `<alias>.<weight_property>` rather than assuming a fixed alias name.
+     This substitution assumes the query follows the convention documented
+     above (`RETURN id(a) AS src, id(b) AS dst, <expr> AS weight`); if the
+     `"... AS weight"` projection can't be located, `reweight_from_property`
+     raises rather than guessing.
+  3. Applies the resulting weights to a **weighted copy** of the cached
+     `NetworKit::Graph` (`NetworKit::Graph(g, /*weighted*/ true,
+     g.isDirected())`) — the shared session-cache entry is never mutated in
+     place. Only edges already present in the cached topology are
+     reweighted (`Graph::hasEdge()` is checked before `Graph::setWeight()`,
+     since `setWeight()` on a nonexistent pair inserts it); rows the reweight
+     query returns for pairs outside the cached topology are silently
+     skipped, matching `age_load_graph`'s own "unknown node" skip behavior.
+  4. Repoints `gh.pg` at the reweighted copy, stored in `gh.owned` (so the
+     wrapper's normal `const ProjectedGraph &pg = *gh.pg;` pattern is
+     unaffected).
+
+  A named graph whose catalog row predates this mechanism (empty
+  `age_graph`/`edge_query`, e.g. very old rows, or `graph_index` live indices
+  created before `graph_index.cpp` started recording the fixed edge query
+  template it uses internally) raises `ereport(ERROR, ...)` rather than
+  silently ignoring the override.
+
+  Cost: the reweighted copy is O(V+E), the same cost every other per-call
+  graph variant already pays (e.g. `wcc_stream`'s `threshold` edge filter).
+
+Currently wired into `pageRank_stream`/`pageRank_stats`
+(`relationship_weight_property text DEFAULT NULL`, last SQL parameter) as
+the reference implementation and regression test
+(`test/sql/11-weight-override.sql`). Other algorithm wrappers adopt the same
+one-line pattern at their own `get_or_load_graph()` call site:
+`GraphHandle gh = get_or_load_graph(...); apply_weight_override(gh,
+weight_property);`.
+
+See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md)
+
+---
+
 ## How algorithm functions work
 
 All algorithm SQL functions follow the same pattern:

@@ -24,6 +24,15 @@ struct ProjectedGraph {
     size_t                   approx_bytes;
     std::chrono::steady_clock::time_point last_used;
 
+    // AGE graph name and the Cypher edge query used at projection time.
+    // Needed by apply_weight_override()/reweight_from_property() to
+    // re-run the projection's edge query against a different property for
+    // a single call, without re-projecting the whole graph. Empty for
+    // graphs projected before this field existed (weight_property override
+    // will raise an error in that case; re-run graph_project to populate).
+    std::string              age_graph;
+    std::string              edge_query;
+
     // --- Live index fields (populated only when live=true) ---
     bool     live             = false;
 
