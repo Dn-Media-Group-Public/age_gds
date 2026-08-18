@@ -19,6 +19,30 @@ Every bullet: **what we have** → **what Neo4j GDS has** → **gap**.
 > - ❌ **Not in NetworKit** — no NetworKit class covers this; needs either an external
 >   library or must stay a documented limitation. See `docs/neo4j-gds-parity-external-libs.md`
 >   for the research on these (delegated to a subagent, listed in §8 below).
+> - 📦 **Closed by an adopted external library** — distinct from ✅: NetworKit has no
+>   primitive for this, but one of the four libraries adopted in the decision below
+>   closes it. Not a wrapper-only fix — implementing it means adding the named
+>   dependency.
+
+> **Decision (2026-08-18): adopt a 4-library minimal set** to close the highest-value
+> ❌ gaps at the lowest dependency/license cost, per
+> `docs/neo4j-gds-parity-external-libs.md`. All four are header-only (or a small
+> self-contained source drop), permissively licensed, and combine into `age_gds.so`
+> without imposing any copyleft obligation on the project (verified against age_gds's
+> own `LICENSE` and NetworKit's MIT license):
+>
+> | Library | License | Closes |
+> |---|---|---|
+> | **[Eigen](https://eigen.tuxfamily.org/)** (sparse module) | MPL 2.0, header-only | §1 `hits_stream` (real Kleinberg HITS via power iteration on AᵀA/AAᵀ) + §6 `node2vec_stream`/new `fastRP_stream` (FastRP via sparse random-projection matmuls) |
+> | **[Boost Graph Library](https://www.boost.org/doc/libs/release/libs/graph/doc/graph_coloring.html)** | Boost Software License 1.0, header-only | §7 new `k1Coloring_stream` (`boost::sequential_vertex_coloring`) |
+> | **[hnswlib](https://github.com/nmslib/hnswlib)** | Apache-2.0, header-only | §4 `knn_stream` (true property-vector KNN, closing the conceptual mismatch flagged there) |
+> | **[pcst_fast](https://github.com/fraenkel-lab/pcst_fast)** | MIT, small self-contained source (no deps) | §7 new `prizeSteinerTree_stream` |
+>
+> Gaps **not** closed by this set (deferred — no library met the
+> low-dependency/permissive-license bar): delta-stepping, plain (non-prize-collecting)
+> Steiner tree, min-weight k-spanning-tree, K-Means/HDBSCAN, SLLPA, approximate
+> max-k-cut, CELF. These remain documented limitations; see
+> `docs/neo4j-gds-parity-external-libs.md` for why each was excluded.
 
 ---
 
@@ -144,8 +168,13 @@ Neo4j `gds.hits.stream`:
 > **NetworKit parity:** ❌ Not in NetworKit. There is no `HITS`, `Hits`, `Hub`, or
 > `Authority` class anywhere under `third_party/networkit/include/networkit` (checked
 > across `centrality/`, `algebraic/algorithms/`). Real Kleinberg HITS is genuinely
-> absent from NetworKit's centrality module — this needs an external library or
-> continues as a documented substitution. Delegated for external-library research (§8).
+> absent from NetworKit's centrality module.
+>
+> 📦 **CLOSED by the adopted library set:** Eigen (sparse module, MPL2, header-only).
+> Build the sparse adjacency matrix `A` from the NetworKit `Graph`, then run power
+> iteration on `AᵀA` (authority) and `AAᵀ` (hub) using Eigen's sparse matrix-vector
+> product — this gives real, distinct Kleinberg auth/hub scores, closing both the
+> `hitsIterations` param gap and the fidelity gap in one fix.
 
 ### `articleRank_stream`
 ```sql
@@ -609,8 +638,20 @@ Neo4j also has a separate `gds.knn.filtered.stream` (source/target node filterin
 > flagged in the report — NetworKit has ❌ no generic feature-vector nearest-neighbor
 > class at all (checked `similarity`-adjacent headers under `linkprediction/` and
 > `embedding/`; nothing resembling ANN/vector search). This is a genuinely different
-> problem domain (vector similarity search) that NetworKit doesn't cover — delegated for
-> external-library research (§8).
+> problem domain (vector similarity search) that NetworKit doesn't cover.
+>
+> 📦 **CLOSED (the conceptual-mismatch part) by the adopted library set:** hnswlib
+> (Apache-2.0, header-only). Its HNSW index gives true nearest-neighbor search over
+> **node property vectors** — the actual Neo4j `knn_stream` semantics — closing the
+> conceptual mismatch entirely: age_gds gains a genuine property-vector KNN function
+> alongside (not replacing) the existing topology-Jaccard one. `topK` and
+> `similarityCutoff` map directly onto hnswlib's query parameters. `sampleRate`/
+> `randomJoins`/`initialSampler`/`perturbationRate` (Neo4j's specific NN-descent-join
+> tuning knobs) remain ❌ not portable — HNSW's incremental-graph construction is a
+> different approximate-NN strategy than NN-descent, so those exact parameters have no
+> equivalent even with hnswlib in place; `deltaThreshold`/`randomSeed` are more
+> plausibly mappable to HNSW's own convergence/seed controls, worth checking during
+> implementation.
 
 ---
 
@@ -714,10 +755,15 @@ own `graph_name`/`age_graph`/`node_query`/`edge_query` conventions.
 
 > **NetworKit parity:** ❌ Not in NetworKit. No `FastRP` class exists anywhere under
 > `embedding/` (only `Node2Vec` and the generic `LearnEmbedding` skip-gram trainer).
-> FastRP (random projection of iterated adjacency powers) is mathematically simple
-> compared to Node2Vec but is still a distinct, named embedding *algorithm*, so
-> hand-rolling it would violate CLAUDE.md's "never implement a graph algorithm from
-> scratch." Delegated for external-library research (§8).
+>
+> 📦 **CLOSED by the adopted library set:** Eigen (sparse module, MPL2, header-only) —
+> the same dependency added for `hits_stream`. FastRP is a sparse random-projection
+> matrix (Achlioptas-style) multiplied iteratively against the normalized adjacency
+> matrix, with weighted iterations combined at the end; Eigen's sparse matrix-vector
+> product and random sparse matrix construction provide exactly these primitives, so
+> the FastRP "recipe" becomes linear-algebra composition on top of an established
+> library rather than a hand-rolled graph traversal — the same pattern already used for
+> HITS above.
 
 ### GraphSAGE (`gds.beta.graphSage.stream`) — inductive neural embedding
 Requires a separately-trained model (`gds.beta.graphSage.train`); `stream` config:
@@ -817,8 +863,16 @@ Likely out of scope per CLAUDE.md ("never implement a graph algorithm from scrat
 | `prizeProperty` | String | n/a | no |
 
 > **NetworKit parity:** ❌ Same as Steiner tree above — not in NetworKit, and
-> prize-collecting variants are an even more specialized NP-hard formulation. Delegated
-> for external-library research (§8), grouped with the plain Steiner tree gap.
+> prize-collecting variants are an even more specialized NP-hard formulation.
+>
+> 📦 **CLOSED by the adopted library set:** `pcst_fast` (MIT, small self-contained C++
+> source, no dependencies). Dedicated implementation of the Goemans-Williamson
+> prize-collecting Steiner forest scheme, already proven in production use (backs the
+> PCST step in the OmicsIntegrator bioinformatics tool). `relationshipWeightProperty`
+> and `prizeProperty` map directly onto its edge-cost and node-prize inputs. Note: the
+> *plain* (non-prize-collecting) Steiner tree gap below remains open — the only library
+> found for that (OGDF) is GPL-2/3 and was excluded on licensing grounds; only the
+> prize-collecting variant is closed here.
 
 ### Minimum-Cost Maximum Flow (`gds.minCostMaxFlow.stream`) — distinct from plain max flow, which we do have a substitute for
 | Name | Type | Default | Optional |
@@ -904,10 +958,15 @@ Same base config as `knn` (`nodeProperties` required, `topK=10`, `sampleRate=0.5
 > `targetNodeFilter` ✅ are pre-filters, same wrapper technique as Filtered Node
 > Similarity. `maxIterations`/`randomJoins`/`initialSampler`/`perturbationRate` are
 > internals of Neo4j's specific NN-descent approximate-KNN algorithm, which NetworKit
-> doesn't implement — ❌ not closable without either adopting that algorithm externally
-> or accepting an exact (non-approximate) computation that ignores these knobs.
-> `similarityCutoff` ✅ is the same threshold filter as elsewhere. Grouped with plain
-> KNN under the property-vector-KNN gap for external-library research (§8).
+> doesn't implement. `similarityCutoff` ✅ is the same threshold filter as elsewhere.
+>
+> 📦 **CLOSED (partially) by the adopted library set:** hnswlib (Apache-2.0,
+> header-only) — same as plain `knn_stream` above, `sourceNodeFilter`/`targetNodeFilter`/
+> `similarityCutoff` become real filters over hnswlib's property-vector index rather
+> than TODOs. `maxIterations`/`randomJoins`/`initialSampler`/`perturbationRate` remain
+> ❌ not portable — these are specifically NN-descent's tuning surface, and hnswlib's
+> HNSW construction doesn't expose equivalent knobs, so this stays a documented
+> divergence even with the new dependency in place.
 
 ### Speaker-Listener Label Propagation / SLLPA (`gds.sllpa.stream`) — overlapping community detection
 | Name | Type | Default | Optional |
@@ -951,7 +1010,13 @@ Like the modularity metric (§2), this scores an *existing* community assignment
 > (Python-only, no corresponding C++ header — `find` turned up only `.py`/`.rst` files,
 > no `.hpp`), and grepped for "Coloring"/"Colouring" across all headers: nothing. Graph
 > coloring (greedy or distributed K1-coloring) is entirely absent from the C++ API.
-> Delegated for external-library research (§8).
+>
+> 📦 **CLOSED by the adopted library set:** Boost Graph Library (Boost Software License
+> 1.0, header-only). `boost::sequential_vertex_coloring` is a direct, well-tested,
+> greedy vertex-coloring algorithm — the cleanest fit of any gap in this whole report:
+> feed it an adjacency view of the NetworKit `Graph` and stream the resulting color
+> assignment. `minCommunitySize` is a post-filter over the result, same pattern used
+> elsewhere in this doc.
 
 ### K-Means Clustering (`gds.kmeans.stream`) — property-vector clustering
 | Name | Type | Default | Optional |
@@ -1047,20 +1112,22 @@ complement NetworKit for these specific gaps, without displacing NetworKit as th
 primary graph-algorithm engine. See `docs/neo4j-gds-parity-external-libs.md` for the
 resulting research once it lands.
 
-**Gaps needing external research** (grouped by shared underlying capability):
-1. **Real HITS** (`hits_stream`) — genuine Kleinberg HITS (distinct auth/hub via power iteration).
-2. **Delta-stepping SSSP** (`deltaStepping_stream`) — low priority, Dijkstra is already correct, just not parallel.
-3. **FastRP** — random-projection node embeddings.
-4. **Yen's k-shortest-paths** — low priority, fairly simple to build from repeated constrained Dijkstra.
-5. **Minimum-weight k-spanning-tree** — niche, low priority.
-6. **Steiner tree (plain + prize-collecting)** — NP-hard approximation algorithms.
-7. **Property-vector KNN / Filtered KNN's approximate NN-descent internals** — vector/ANN search over node feature vectors, not graph topology (also covers `gds.knn.filtered`'s `maxIterations`/`randomJoins`/`initialSampler`/`perturbationRate`).
-8. **K-Means clustering over node property vectors** — general vector clustering, not graph-topological.
-9. **HDBSCAN over node property vectors** — same vector-clustering bucket as K-Means.
-10. **SLLPA (overlapping community detection)** — Speaker-Listener Label Propagation.
-11. **K-1 Coloring** — greedy/distributed graph coloring.
-12. **Approximate Maximum k-cut** — combinatorial optimization (VNS/local search).
-13. **CELF / influence maximization** — independent-cascade diffusion simulation.
+**Gaps needing external research** (grouped by shared underlying capability). Status
+reflects the 2026-08-18 decision to adopt Eigen, Boost Graph Library, hnswlib, and
+pcst_fast (see the boxed decision note near the top of this document):
+1. 📦 **CLOSED — Real HITS** (`hits_stream`) — Eigen (power iteration on AᵀA/AAᵀ).
+2. **Delta-stepping SSSP** (`deltaStepping_stream`) — still open, deferred (low priority, Dijkstra is already correct, just not parallel).
+3. 📦 **CLOSED — FastRP** — Eigen (sparse random-projection matmuls).
+4. **Yen's k-shortest-paths** — still open, deferred (low priority, fairly simple to build from repeated constrained Dijkstra, no library needed if pursued).
+5. **Minimum-weight k-spanning-tree** — still open, deferred (niche, low priority).
+6. **Steiner tree** — ⚠️ split: plain/directed Steiner tree still open (only candidate, OGDF, is GPL-2/3 — excluded on licensing grounds); 📦 **CLOSED — prize-collecting Steiner tree** — pcst_fast.
+7. 📦 **CLOSED (mostly) — Property-vector KNN** — hnswlib. Filtered KNN's NN-descent-specific internals (`maxIterations`/`randomJoins`/`initialSampler`/`perturbationRate`) remain open — hnswlib's HNSW construction doesn't expose equivalent knobs.
+8. **K-Means clustering over node property vectors** — still open, deferred (best options, mlpack/dlib, pull in more than this minimal set wanted).
+9. **HDBSCAN over node property vectors** — still open, deferred (same vector-clustering bucket as K-Means).
+10. **SLLPA (overlapping community detection)** — still open, deferred (no credible maintained library found at all).
+11. 📦 **CLOSED — K-1 Coloring** — Boost Graph Library (`sequential_vertex_coloring`).
+12. **Approximate Maximum k-cut** — still open, deferred (only viable option, OR-Tools, is too heavy a dependency for this feature).
+13. **CELF / influence maximization** — still open, deferred (no credible maintained library found at all).
 14. **GraphSAGE** — out of scope, not included (needs both a GNN library and a model-catalog concept beyond age_gds's design).
 
 ---
