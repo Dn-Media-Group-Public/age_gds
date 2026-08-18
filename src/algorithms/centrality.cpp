@@ -9,17 +9,24 @@
 
 #include <networkit/centrality/PageRank.hpp>
 #include <networkit/centrality/Betweenness.hpp>
+#include <networkit/centrality/ApproxBetweenness.hpp>
 #include <networkit/centrality/Closeness.hpp>
 #include <networkit/centrality/HarmonicCloseness.hpp>
 #include <networkit/centrality/DegreeCentrality.hpp>
 #include <networkit/centrality/EigenvectorCentrality.hpp>
 #include <networkit/components/BiconnectedComponents.hpp>
+#include <networkit/components/ConnectedComponents.hpp>
+#include <networkit/auxiliary/Random.hpp>
 #include <networkit/graph/Graph.hpp>
 #include <networkit/Globals.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
+#include <vector>
 
 extern "C" {
 #include "postgres.h"
@@ -37,6 +44,7 @@ extern "C" {
 #include "util/config_parser.h"
 #include "util/srf_helper.h"
 #include "util/weight_override.h"
+#include "util/scaler.h"
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -44,10 +52,11 @@ extern "C" {
 // pageRank arg layout:
 //   0=graph_name, 1=damping_factor, 2=max_iterations, 3=tolerance,
 //   4=config, 5=age_graph, 6=node_query, 7=edge_query,
-//   8=weight_property (relationship_weight_property)
+//   8=weight_property (relationship_weight_property), 9=scaler
 static GraphHandle get_args(
     FunctionCallInfo fcinfo,
-    PageRankConfig  *cfg_out)
+    PageRankConfig  *cfg_out,
+    std::string     *scaler_out)
 {
     bool   has_damping  = !PG_ARGISNULL(1);
     double damping      = has_damping  ? PG_GETARG_FLOAT8(1) : 0.85;
@@ -70,6 +79,9 @@ static GraphHandle get_args(
     const char *eq     = PG_ARGISNULL(7) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(7));
     const char *wprop  = PG_ARGISNULL(8) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(8));
 
+    if (scaler_out)
+        *scaler_out = PG_ARGISNULL(9) ? "" : text_to_cstring(PG_GETARG_TEXT_PP(9));
+
     GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
     apply_weight_override(gh, wprop);
     return gh;
@@ -84,6 +96,18 @@ static GraphHandle resolve_graph_args(FunctionCallInfo fcinfo, int age_graph_idx
     const char *nq     = PG_ARGISNULL(age_graph_idx + 1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx + 1));
     const char *eq     = PG_ARGISNULL(age_graph_idx + 2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(age_graph_idx + 2));
     return get_or_load_graph(gname, agraph, nq, eq);
+}
+
+// Applies `scaler` (may be empty => no-op) to `scores`, translating a bad
+// scaler name into a SQL-level ERROR instead of a C++ exception.
+static void apply_scaler_checked(std::vector<double> &scores, const std::string &scaler)
+{
+    try {
+        apply_scaler(scores, scaler);
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s", ex.what())));
+    }
 }
 
 /* ============================================================ C functions */
@@ -106,7 +130,8 @@ PG_FUNCTION_INFO_V1(age_gds_articulationpoints_stream);
 Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
 {
     PageRankConfig cfg;
-    GraphHandle    gh = get_args(fcinfo, &cfg);
+    std::string    scaler;
+    GraphHandle    gh = get_args(fcinfo, &cfg, &scaler);
     const ProjectedGraph &pg = *gh.pg;
 
     NetworKit::PageRank pr(pg.graph, cfg.damping_factor, cfg.tolerance);
@@ -119,7 +144,8 @@ Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
                  errmsg("PageRank failed: %s", ex.what())));
     }
 
-    const auto &scores = pr.scores();
+    std::vector<double> scores = pr.scores();
+    apply_scaler_checked(scores, scaler);
 
     Oid types[2] = {INT8OID, FLOAT8OID};
     SRFState s   = srf_begin(fcinfo, 2, types);
@@ -144,7 +170,8 @@ Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
 Datum age_gds_pagerank_stats(PG_FUNCTION_ARGS)
 {
     PageRankConfig cfg;
-    GraphHandle    gh = get_args(fcinfo, &cfg);
+    std::string    scaler;
+    GraphHandle    gh = get_args(fcinfo, &cfg, &scaler);
     const ProjectedGraph &pg = *gh.pg;
 
     auto t0 = std::chrono::steady_clock::now();
@@ -163,9 +190,11 @@ Datum age_gds_pagerank_stats(PG_FUNCTION_ARGS)
     int64_t compute_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              t1 - t0).count();
 
-    const auto       &scores   = pr.scores();
-    NetworKit::count  ran_iter = pr.numberOfIterations();
-    bool              converged = ran_iter < (NetworKit::count)cfg.max_iterations;
+    std::vector<double> scores    = pr.scores();
+    NetworKit::count     ran_iter = pr.numberOfIterations();
+    bool                 converged = ran_iter < (NetworKit::count)cfg.max_iterations;
+
+    apply_scaler_checked(scores, scaler);
 
     double min_score = 0.0, max_score = 0.0, mean_score = 0.0;
     uint64_t n = 0;
@@ -202,20 +231,55 @@ Datum age_gds_pagerank_stats(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- betweenness_stream ------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=sampling_size, 5=sampling_seed, 6=relationship_weight_property
 
 Datum age_gds_betweenness_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    bool has_sampling_size = !PG_ARGISNULL(4);
+    int  sampling_size     = has_sampling_size ? PG_GETARG_INT32(4) : 0;
+    bool has_sampling_seed = !PG_ARGISNULL(5);
+    int  sampling_seed     = has_sampling_seed ? PG_GETARG_INT32(5) : 0;
+    const char *wprop  = PG_ARGISNULL(6) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(6));
+
+    if (has_sampling_size && sampling_size <= 0)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("sampling_size must be a positive integer")));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::Betweenness algo(pg.graph, false);
-    try { algo.run(); }
-    catch (const std::exception &ex) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                        errmsg("Betweenness failed: %s", ex.what())));
+    std::vector<double> scores;
+
+    if (has_sampling_size) {
+        if (has_sampling_seed)
+            Aux::Random::setSeed((uint64_t)sampling_seed, false);
+
+        double epsilon = 1.0 / std::sqrt((double)sampling_size);
+        double delta   = 0.1;
+
+        NetworKit::ApproxBetweenness algo(pg.graph, epsilon, delta);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("ApproxBetweenness failed: %s", ex.what())));
+        }
+        scores = algo.scores();
+    } else {
+        NetworKit::Betweenness algo(pg.graph, false);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("Betweenness failed: %s", ex.what())));
+        }
+        scores = algo.scores();
     }
 
-    const auto &scores = algo.scores();
     Oid types[2] = {INT8OID, FLOAT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
@@ -229,14 +293,23 @@ Datum age_gds_betweenness_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- closeness_stream --------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=use_wasserman_faust
 
 Datum age_gds_closeness_stream(PG_FUNCTION_ARGS)
 {
     GraphHandle gh = resolve_graph_args(fcinfo, 1);
     const ProjectedGraph &pg = *gh.pg;
 
-    // GENERALIZED variant works for disconnected graphs too
-    NetworKit::Closeness algo(pg.graph, false, NetworKit::ClosenessVariant::GENERALIZED);
+    bool use_wasserman_faust = PG_ARGISNULL(4) ? false : PG_GETARG_BOOL(4);
+
+    // STANDARD == Wasserman-Faust variant; GENERALIZED is the previous
+    // default (handles disconnected graphs without dividing by zero).
+    NetworKit::ClosenessVariant variant = use_wasserman_faust
+        ? NetworKit::ClosenessVariant::STANDARD
+        : NetworKit::ClosenessVariant::GENERALIZED;
+
+    NetworKit::Closeness algo(pg.graph, false, variant);
     try { algo.run(); }
     catch (const std::exception &ex) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
@@ -284,20 +357,90 @@ Datum age_gds_harmoniccentrality_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- degree_stream ------------ */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=orientation, 5=relationship_weight_property
+
+enum class DegreeOrientation { NATURAL, REVERSE, UNDIRECTED };
+
+static DegreeOrientation parse_orientation(const char *text)
+{
+    if (!text)
+        return DegreeOrientation::NATURAL;
+
+    std::string s(text);
+    if (s == "NATURAL")    return DegreeOrientation::NATURAL;
+    if (s == "REVERSE")    return DegreeOrientation::REVERSE;
+    if (s == "UNDIRECTED") return DegreeOrientation::UNDIRECTED;
+
+    ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                    errmsg("orientation must be one of 'NATURAL', 'REVERSE', "
+                           "'UNDIRECTED' (got \"%s\")", text)));
+    return DegreeOrientation::NATURAL; // unreachable
+}
 
 Datum age_gds_degree_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *orient_txt = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    const char *wprop  = PG_ARGISNULL(5) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(5));
+
+    DegreeOrientation orientation = parse_orientation(orient_txt);
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::DegreeCentrality algo(pg.graph, false);
-    try { algo.run(); }
-    catch (const std::exception &ex) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                        errmsg("DegreeCentrality failed: %s", ex.what())));
+    std::vector<double> scores(pg.graph.upperNodeIdBound(), 0.0);
+
+    if (wprop) {
+        // Weighted case: NetworKit has no weighted-degree algorithm class —
+        // Graph::weightedDegree()/weightedDegreeIn() already compute exactly
+        // this in O(1)-per-node, so no Centrality subclass is needed here.
+        pg.graph.forNodes([&](NetworKit::node u) {
+            switch (orientation) {
+            case DegreeOrientation::NATURAL:
+                scores[u] = pg.graph.weightedDegree(u);
+                break;
+            case DegreeOrientation::REVERSE:
+                scores[u] = pg.graph.weightedDegreeIn(u);
+                break;
+            case DegreeOrientation::UNDIRECTED:
+                scores[u] = pg.graph.isDirected()
+                    ? pg.graph.weightedDegree(u) + pg.graph.weightedDegreeIn(u)
+                    : pg.graph.weightedDegree(u);
+                break;
+            }
+        });
+    } else {
+        bool outDeg = (orientation != DegreeOrientation::REVERSE);
+
+        NetworKit::DegreeCentrality algo(pg.graph, false, outDeg);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("DegreeCentrality failed: %s", ex.what())));
+        }
+        const auto &deg_scores = algo.scores();
+
+        if (orientation == DegreeOrientation::UNDIRECTED && pg.graph.isDirected()) {
+            NetworKit::DegreeCentrality algo_in(pg.graph, false, false);
+            try { algo_in.run(); }
+            catch (const std::exception &ex) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                errmsg("DegreeCentrality failed: %s", ex.what())));
+            }
+            const auto &in_scores = algo_in.scores();
+            pg.graph.forNodes([&](NetworKit::node u) {
+                scores[u] = deg_scores[u] + in_scores[u];
+            });
+        } else {
+            pg.graph.forNodes([&](NetworKit::node u) { scores[u] = deg_scores[u]; });
+        }
     }
 
-    const auto &scores = algo.scores();
     Oid types[2] = {INT8OID, FLOAT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
@@ -311,20 +454,33 @@ Datum age_gds_degree_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- eigenvector_stream ------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=tolerance, 5=relationship_weight_property, 6=scaler
 
 Datum age_gds_eigenvector_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    double tolerance   = PG_ARGISNULL(4) ? 1e-7 : PG_GETARG_FLOAT8(4);
+    const char *wprop  = PG_ARGISNULL(5) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(5));
+    std::string scaler = PG_ARGISNULL(6) ? "" : text_to_cstring(PG_GETARG_TEXT_PP(6));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::EigenvectorCentrality algo(pg.graph);
+    NetworKit::EigenvectorCentrality algo(pg.graph, tolerance);
     try { algo.run(); }
     catch (const std::exception &ex) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("EigenvectorCentrality failed: %s", ex.what())));
     }
 
-    const auto &scores = algo.scores();
+    std::vector<double> scores = algo.scores();
+    apply_scaler_checked(scores, scaler);
+
     Oid types[2] = {INT8OID, FLOAT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
@@ -371,14 +527,29 @@ Datum age_gds_hits_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- articleRank_stream ------- */
-// articleRank uses PageRank with default damping 0.85 (same as pageRank).
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=damping_factor, 5=tolerance, 6=relationship_weight_property,
+//             7=scaler
+// NetworKit has no ArticleRank class; PageRank is used with configurable
+// damping/tolerance (previously hardcoded to 0.85/1e-6 — 1e-6 did not match
+// Neo4j GDS's 1e-7 default, now fixed).
 
 Datum age_gds_articlerank_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    double damping     = PG_ARGISNULL(4) ? 0.85 : PG_GETARG_FLOAT8(4);
+    double tolerance   = PG_ARGISNULL(5) ? 1e-7 : PG_GETARG_FLOAT8(5);
+    const char *wprop  = PG_ARGISNULL(6) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(6));
+    std::string scaler = PG_ARGISNULL(7) ? "" : text_to_cstring(PG_GETARG_TEXT_PP(7));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::PageRank pr(pg.graph, 0.85, 1e-6);
+    NetworKit::PageRank pr(pg.graph, damping, tolerance);
     pr.maxIterations = 20;
 
     try { pr.run(); }
@@ -387,7 +558,9 @@ Datum age_gds_articlerank_stream(PG_FUNCTION_ARGS)
                         errmsg("ArticleRank (PageRank) failed: %s", ex.what())));
     }
 
-    const auto &scores = pr.scores();
+    std::vector<double> scores = pr.scores();
+    apply_scaler_checked(scores, scaler);
+
     Oid types[2] = {INT8OID, FLOAT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
@@ -404,6 +577,11 @@ Datum age_gds_articlerank_stream(PG_FUNCTION_ARGS)
 // NetworKit has no ArticulationPoints class. Use BiconnectedComponents:
 // a node is an articulation point iff it belongs to more than one
 // biconnected component (getComponentsOfNode returns a set of component ids).
+//
+// For each articulation point, additionally report the sizes of the
+// connected components that result from removing it (resulting_component_*
+// columns), computed via NetworKit::ConnectedComponents on a private copy
+// of the graph with that single node removed.
 
 Datum age_gds_articulationpoints_stream(PG_FUNCTION_ARGS)
 {
@@ -417,16 +595,44 @@ Datum age_gds_articulationpoints_stream(PG_FUNCTION_ARGS)
                         errmsg("BiconnectedComponents failed: %s", ex.what())));
     }
 
-    Oid types[1] = {INT8OID};
-    SRFState s = srf_begin(fcinfo, 1, types);
+    Oid types[4] = {INT8OID, INT4OID, INT4OID, INT4OID};
+    SRFState s = srf_begin(fcinfo, 4, types);
 
     pg.graph.forNodes([&](NetworKit::node u) {
         const auto &comps = bcc.getComponentsOfNode(u);
-        if (comps.size() > 1) {
-            Datum values[1]; bool nulls[1] = {false};
-            values[0] = Int64GetDatum(pg.id_map.resolve(u));
-            srf_emit(s, values, nulls);
+        if (comps.size() <= 1)
+            return;
+
+        NetworKit::Graph without_u(pg.graph);
+        without_u.removeNode(u);
+
+        NetworKit::ConnectedComponents cc(without_u);
+        try { cc.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("ConnectedComponents failed: %s", ex.what())));
         }
+
+        auto sizes = cc.getComponentSizes();
+        int32_t comp_count = (int32_t)sizes.size();
+        int32_t comp_min = 0, comp_max = 0;
+        bool first = true;
+        for (const auto &[comp_id, size] : sizes) {
+            (void)comp_id;
+            int32_t sz = (int32_t)size;
+            if (first) { comp_min = comp_max = sz; first = false; }
+            else {
+                comp_min = std::min(comp_min, sz);
+                comp_max = std::max(comp_max, sz);
+            }
+        }
+
+        Datum values[4]; bool nulls[4] = {false, false, false, false};
+        values[0] = Int64GetDatum(pg.id_map.resolve(u));
+        values[1] = Int32GetDatum(comp_count);
+        values[2] = Int32GetDatum(comp_min);
+        values[3] = Int32GetDatum(comp_max);
+        srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
 }

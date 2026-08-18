@@ -14,3 +14,4 @@ Listed in implementation order.
 - [Plan 9: Live Graph Index](09-live-graph-index.md)
 - [Plan 10: Cross-Backend Cache Invalidation (Snapshot Version Cache)](10-snapshot-version-cache.md)
 - [Plan: Per-call Relationship Weight Plumbing](00-weight-plumbing.md)
+- [Plan: Centrality Algorithm Parity Fixes](01-centrality-parity.md)

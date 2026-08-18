@@ -5,7 +5,8 @@
 Close the ✅/⚠️-closable gaps in `docs/neo4j-gds-parity-report.md` §1
 (Centrality) between `age_gds` and Neo4j GDS, using only NetworKit classes
 already vendored plus thin wrapper/post-processing code. Depends on
-`docs/plans/00-weight-plumbing.md` for all `relationshipWeightProperty` items.
+[Plan: Per-call Relationship Weight Plumbing](00-weight-plumbing.md) for all
+`relationshipWeightProperty` items.
 
 Excluded (❌ not in NetworKit, out of scope for this plan): PageRank/ArticleRank/
 Eigenvector `maxIterations` (no setter in NetworKit), PageRank/ArticleRank/

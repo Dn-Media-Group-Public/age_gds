@@ -375,18 +375,32 @@ The two execution paths satisfy the convention differently:
   template it uses internally) raises `ereport(ERROR, ...)` rather than
   silently ignoring the override.
 
+  `reweight_from_property()` detects "did the substitution actually happen"
+  by comparing the substituted query string to the original — if they're
+  byte-identical, it treats that as "no `AS weight` projection found" and
+  throws `std::runtime_error`. This is a false positive in one degenerate
+  case: overriding with the *same* property name the projection's own
+  `edge_query` already used produces an identical string too, so that call
+  also raises. `apply_weight_override()` (`src/util/weight_override.cpp`)
+  wraps the call to `reweight_from_property()` in a `try`/`catch` and
+  re-raises via `ereport(ERROR, ...)` — without this, the uncaught
+  `std::runtime_error` would cross the C/C++ boundary into PostgreSQL's `.so`
+  entry point and abort the whole backend process instead of returning a SQL
+  error (see `test/sql/12-centrality-parity.sql`'s degenerate-override case).
+
   Cost: the reweighted copy is O(V+E), the same cost every other per-call
   graph variant already pays (e.g. `wcc_stream`'s `threshold` edge filter).
 
-Currently wired into `pageRank_stream`/`pageRank_stats`
-(`relationship_weight_property text DEFAULT NULL`, last SQL parameter) as
-the reference implementation and regression test
-(`test/sql/11-weight-override.sql`). Other algorithm wrappers adopt the same
-one-line pattern at their own `get_or_load_graph()` call site:
-`GraphHandle gh = get_or_load_graph(...); apply_weight_override(gh,
-weight_property);`.
+Wired into `pageRank_stream`/`pageRank_stats` (the reference implementation
+and regression test, `test/sql/11-weight-override.sql`), and, per
+[Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md),
+into `betweenness_stream`, `degree_stream`, `eigenvector_stream`, and
+`articleRank_stream`. Other algorithm wrappers adopt the same one-line
+pattern at their own `get_or_load_graph()` call site: `GraphHandle gh =
+get_or_load_graph(...); apply_weight_override(gh, weight_property);`.
 
-See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md)
+See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md),
+[Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -434,6 +448,23 @@ comment in both the SQL DDL and the C++ source.
 | `bellmanFord_stream`     | Bellman-Ford SSSP   | `Dijkstra`                   | NetworKit's `AlgebraicBellmanFord<Matrix>` requires a matrix instantiation impractical to use here |
 | `triangleCount_stream`   | Triangle count      | `LocalClusteringCoefficient` | Triangles computed as `round(lcc * deg * (deg-1) / 2)` |
 | `randomWalk_stream`      | Random walk         | `Aux::Random::choice` + `Graph::forNeighborsOf` | No `RandomWalk` class in NetworKit |
+| `betweenness_stream` (`sampling_size` set) | Approximate betweenness | `ApproxBetweenness` | `sampling_size` maps to `epsilon = 1/sqrt(sampling_size)`, fixed `delta = 0.1`; `sampling_seed` calls `Aux::Random::setSeed()` first. Requires an undirected graph — its diameter-estimation step does not support directed input (a NetworKit limitation, see `test/sql/12-centrality-parity.sql`) |
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
+(added `ApproxBetweenness` as a new NetworKit dependency alongside the
+existing exact `Betweenness`).
+
+### Shared post-processing helpers
+
+- `src/util/scaler.h`/`.cpp` — `apply_scaler(scores, scaler)` implements the
+  Neo4j-GDS-style `scaler` parameter (`MinMax`, `Max`, `Mean`, `Log`,
+  `StdScore`) as a one-pass post-processing step over a score vector, after
+  the NetworKit algorithm has already run. Shared by `pageRank_stream`/
+  `_stats`, `eigenvector_stream`, and `articleRank_stream`. An unrecognized
+  scaler name throws `std::invalid_argument`, caught by each wrapper and
+  turned into `ereport(ERROR, ...)`.
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 

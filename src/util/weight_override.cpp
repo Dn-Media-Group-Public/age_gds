@@ -9,6 +9,7 @@
 #include "util/weight_override.h"
 #include "bridge/age_loader.h"
 
+#include <stdexcept>
 #include <utility>
 
 extern "C" {
@@ -41,9 +42,22 @@ void apply_weight_override(GraphHandle &gh, const char *weight_property)
                         "(re-run graph_project or graph_index to populate them)",
                         pg.name.c_str())));
 
-    NetworKit::Graph reweighted = reweight_from_property(
-        pg.graph, pg.id_map,
-        pg.age_graph.c_str(), pg.edge_query.c_str(), weight_property);
+    // reweight_from_property() throws std::runtime_error (e.g. when it
+    // cannot locate the "... AS weight" projection to substitute into) —
+    // that is a plain C++ exception, and letting it cross the C/C++
+    // boundary uncaught would abort the whole backend process instead of
+    // returning a SQL-level error. Catch and re-raise via ereport(ERROR).
+    NetworKit::Graph reweighted;
+    try {
+        reweighted = reweight_from_property(
+            pg.graph, pg.id_map,
+            pg.age_graph.c_str(), pg.edge_query.c_str(), weight_property);
+    } catch (const std::exception &ex) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("weight_property override failed for graph \"%s\": %s",
+                        pg.name.c_str(), ex.what())));
+    }
 
     ProjectedGraph copy;
     copy.name           = pg.name;

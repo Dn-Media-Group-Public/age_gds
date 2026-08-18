@@ -49,11 +49,20 @@ for the full design.
 - `NULL` (the default) is always a no-op: the call behaves exactly as if the
   parameter were omitted.
 
-Currently available on: `pageRank_stream`, `pageRank_stats`. Other
-algorithms adopt the same trailing parameter as their own plans are
-implemented.
+Currently available on: `pageRank_stream`, `pageRank_stats`,
+`betweenness_stream`, `degree_stream`, `eigenvector_stream`,
+`articleRank_stream`. Other algorithms adopt the same trailing parameter as
+their own plans are implemented.
 
-See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md)
+Note: passing the exact same property name the graph's projection already
+uses for its `weight` column is a degenerate case for the override's
+substitution logic (it can't distinguish "already this value" from "no
+weight projection found" by string comparison) and raises an error rather
+than silently no-oping; pick a different property, or don't pass the
+override, in that situation.
+
+See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md),
+[Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ### nodeId values
 
@@ -365,7 +374,8 @@ age_gds.pageRank_stream(
     age_graph                     text   DEFAULT NULL,
     node_query                    text   DEFAULT NULL,
     edge_query                    text   DEFAULT NULL,
-    relationship_weight_property  text   DEFAULT NULL
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
@@ -381,10 +391,20 @@ Computes PageRank scores. Delegates to `NetworKit::PageRank`.
   [Relationship weight override](#relationship-weight-override-weight_property--relationship_weight_property)
   above. Only meaningful with `graph_name` (named/cached graphs); ignored (via
   `apply_weight_override`'s anonymous-mode no-op) when using `age_graph`.
+- `scaler` — optional post-processing pass applied to the score vector after
+  PageRank has run, matching Neo4j GDS's `scaler` convention: one of
+  `'MinMax'`, `'Max'`, `'Mean'`, `'Log'`, `'StdScore'`. `NULL` (default) skips
+  scaling. An unrecognized value raises `ERRCODE_INVALID_PARAMETER_VALUE`.
+  Implemented once in `src/util/scaler.h`/`.cpp`, shared with
+  `eigenvector_stream` and `articleRank_stream`.
 
-Scores sum to approximately 1.0. All scores are non-negative.
+Scores sum to approximately 1.0 (before any `scaler`). All scores are
+non-negative before scaling; `Log`/`StdScore` scaling can produce negative
+or zero values.
 
 **NetworKit class:** `NetworKit::PageRank`
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -400,7 +420,8 @@ age_gds.pageRank_stats(
     age_graph                     text   DEFAULT NULL,
     node_query                    text   DEFAULT NULL,
     edge_query                    text   DEFAULT NULL,
-    relationship_weight_property  text   DEFAULT NULL
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE(
     "ranIterations" int,
     "didConverge"   bool,
@@ -414,10 +435,13 @@ age_gds.pageRank_stats(
 Runs PageRank and returns a single summary row instead of per-node scores.
 `didConverge` is `true` when `ranIterations < max_iterations`.
 
-`relationship_weight_property` behaves identically to `pageRank_stream` (see
-above).
+`relationship_weight_property` and `scaler` behave identically to
+`pageRank_stream` (see above); `minScore`/`maxScore`/`meanScore` are computed
+*after* `scaler` is applied.
 
 **NetworKit class:** `NetworKit::PageRank`
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -425,16 +449,36 @@ above).
 
 ```sql
 age_gds.betweenness_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text DEFAULT NULL,
+    age_graph                     text DEFAULT NULL,
+    node_query                    text DEFAULT NULL,
+    edge_query                    text DEFAULT NULL,
+    sampling_size                 int  DEFAULT NULL,
+    sampling_seed                 int  DEFAULT NULL,
+    relationship_weight_property  text DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
 Betweenness centrality: fraction of shortest paths passing through each node.
 
-**NetworKit class:** `NetworKit::Betweenness` (normalized=false)
+**Parameters:**
+- `sampling_size` — when set (must be a positive integer), switches from
+  exact `NetworKit::Betweenness` to `NetworKit::ApproxBetweenness`, matching
+  Neo4j GDS's approximate-betweenness `samplingSize` convention. Internally
+  maps to `epsilon = 1 / sqrt(sampling_size)` with a fixed `delta = 0.1`.
+  **Requires an undirected graph** — `ApproxBetweenness`'s diameter-estimation
+  step does not support directed input and raises an error there (a
+  NetworKit limitation, not an age_gds restriction).
+- `sampling_seed` — only meaningful together with `sampling_size`; calls
+  `Aux::Random::setSeed()` before running, for reproducible sampling.
+- `relationship_weight_property` — see
+  [Relationship weight override](#relationship-weight-override-weight_property--relationship_weight_property)
+  above.
+
+**NetworKit class:** `NetworKit::Betweenness` (normalized=false) or, when
+`sampling_size` is set, `NetworKit::ApproxBetweenness`
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -442,17 +486,22 @@ Betweenness centrality: fraction of shortest paths passing through each node.
 
 ```sql
 age_gds.closeness_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name          text    DEFAULT NULL,
+    age_graph           text    DEFAULT NULL,
+    node_query          text    DEFAULT NULL,
+    edge_query          text    DEFAULT NULL,
+    use_wasserman_faust boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
-Closeness centrality. Uses the `GENERALIZED` variant, which handles
-disconnected graphs without dividing by zero.
+Closeness centrality. `use_wasserman_faust = false` (default) uses the
+`GENERALIZED` variant, which handles disconnected graphs without dividing by
+zero; `use_wasserman_faust = true` uses the `STANDARD` (Wasserman-Faust)
+variant, matching Neo4j GDS's `useWassermanFaust` parameter.
 
-**NetworKit class:** `NetworKit::Closeness` (variant=GENERALIZED)
+**NetworKit class:** `NetworKit::Closeness` (variant=GENERALIZED or STANDARD)
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -478,16 +527,35 @@ disconnected graphs (unreachable pairs contribute 0).
 
 ```sql
 age_gds.degree_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text DEFAULT NULL,
+    age_graph                     text DEFAULT NULL,
+    node_query                    text DEFAULT NULL,
+    edge_query                    text DEFAULT NULL,
+    orientation                   text DEFAULT 'NATURAL',
+    relationship_weight_property  text DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
-Degree centrality (normalized node degree).
+Degree centrality (unnormalized node degree).
 
-**NetworKit class:** `NetworKit::DegreeCentrality` (normalized=false)
+**Parameters:**
+- `orientation` — one of `'NATURAL'` (out-degree, default), `'REVERSE'`
+  (in-degree), or `'UNDIRECTED'` (in-degree + out-degree; on an already
+  undirected graph this equals the plain degree). Matches Neo4j GDS's degree
+  centrality `orientation` parameter. Any other value raises
+  `ERRCODE_INVALID_PARAMETER_VALUE`.
+- `relationship_weight_property` — see
+  [Relationship weight override](#relationship-weight-override-weight_property--relationship_weight_property)
+  above. When set, weighted degree is computed directly via
+  `Graph::weightedDegree()`/`weightedDegreeIn()` (no `DegreeCentrality`
+  instance is needed for the weighted case — those are already O(1) per
+  node on the graph object).
+
+**NetworKit class:** `NetworKit::DegreeCentrality` (normalized=false), or
+`Graph::weightedDegree()`/`weightedDegreeIn()` directly when
+`relationship_weight_property` is set
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -495,17 +563,39 @@ Degree centrality (normalized node degree).
 
 ```sql
 age_gds.eigenvector_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
 Eigenvector centrality: node importance proportional to the importance of its
 neighbors.
 
+**Parameters:**
+- `tolerance` — convergence threshold passed to
+  `NetworKit::EigenvectorCentrality`'s constructor, default `1e-7`.
+- `relationship_weight_property` — see
+  [Relationship weight override](#relationship-weight-override-weight_property--relationship_weight_property)
+  above.
+- `scaler` — see `pageRank_stream`'s `scaler` parameter above; same allowed
+  values, same shared implementation.
+
+**Caveat:** `NetworKit::EigenvectorCentrality`'s power iteration has no
+damping term. On a directed graph that is not irreducible (e.g. a directed
+acyclic graph), the propagated score vector's magnitude can decay to zero,
+which trips an internal NetworKit assertion. This is a limitation of the
+vendored class on non-irreducible directed graphs, not an age_gds
+restriction; prefer running this on undirected graphs, or directed graphs
+known to be strongly connected.
+
 **NetworKit class:** `NetworKit::EigenvectorCentrality`
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -535,20 +625,40 @@ for authority scores.
 
 ```sql
 age_gds.articleRank_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    damping_factor                float8 DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
 ```
 
-ArticleRank centrality. Run with fixed parameters: damping=0.85,
-tolerance=1e-6, maxIterations=20.
+ArticleRank centrality.
+
+**Parameters:**
+- `damping_factor` — default `0.85`.
+- `tolerance` — default `1e-7` (previously hardcoded to `1e-6`, which did not
+  match Neo4j GDS's `1e-7` default — fixed as part of
+  [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)).
+- `relationship_weight_property` — see
+  [Relationship weight override](#relationship-weight-override-weight_property--relationship_weight_property)
+  above.
+- `scaler` — see `pageRank_stream`'s `scaler` parameter above; same allowed
+  values, same shared implementation.
+
+`max_iterations` is not exposed (fixed internally at `20`) — matches
+`pageRank_stream`'s default and NetworKit's `PageRank` has no separate
+ArticleRank-specific iteration cap.
 
 **Substitution:** NetworKit has no ArticleRank class. `NetworKit::PageRank`
-is used with default parameters.
+is used, with the parameters above.
 
 **NetworKit class:** `NetworKit::PageRank`
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 
@@ -560,17 +670,36 @@ age_gds.articulationPoints_stream(
     age_graph  text DEFAULT NULL,
     node_query text DEFAULT NULL,
     edge_query text DEFAULT NULL
-) RETURNS TABLE("nodeId" bigint)
+) RETURNS TABLE(
+    "nodeId"                  bigint,
+    "resultingComponentCount" int,
+    "resultingComponentMin"   int,
+    "resultingComponentMax"   int
+)
 ```
 
 Returns the set of articulation points (cut vertices) — nodes whose removal
-increases the number of connected components.
+increases the number of connected components — one row per articulation
+point (not one row per graph node).
 
-**Substitution:** NetworKit has no dedicated ArticulationPoints class. Computed
-via `BiconnectedComponents`: a node is an articulation point if and only if
-`getComponentsOfNode(u).size() > 1`.
+**Columns:**
+- `nodeId` — the articulation point's AGE graphid.
+- `resultingComponentCount`/`resultingComponentMin`/`resultingComponentMax`
+  — the number of connected components, and the smallest/largest component
+  size, that result from removing this single node from the graph. Computed
+  by running `NetworKit::ConnectedComponents` on a private copy of the graph
+  (`Graph::removeNode()`) for each reported articulation point; matches
+  Neo4j GDS's articulation-points procedure returning per-point
+  `componentSizes`/`componentCount`.
 
-**NetworKit class:** `NetworKit::BiconnectedComponents`
+**Substitution:** NetworKit has no dedicated ArticulationPoints class. The
+point set is computed via `BiconnectedComponents`: a node is an articulation
+point if and only if `getComponentsOfNode(u).size() > 1`.
+
+**NetworKit classes:** `NetworKit::BiconnectedComponents`,
+`NetworKit::ConnectedComponents`
+
+See also: [Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
 
 ---
 

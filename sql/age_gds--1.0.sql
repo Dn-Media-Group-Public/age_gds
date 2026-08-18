@@ -164,7 +164,8 @@ CREATE FUNCTION age_gds.pageRank_stream(
     age_graph                     text   DEFAULT NULL,
     node_query                    text   DEFAULT NULL,
     edge_query                    text   DEFAULT NULL,
-    relationship_weight_property  text   DEFAULT NULL
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_pagerank_stream'
     LANGUAGE C;
@@ -178,7 +179,8 @@ CREATE FUNCTION age_gds.pageRank_stats(
     age_graph                     text   DEFAULT NULL,
     node_query                    text   DEFAULT NULL,
     edge_query                    text   DEFAULT NULL,
-    relationship_weight_property  text   DEFAULT NULL
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("ranIterations" int, "didConverge" bool, "computeMillis" bigint,
                 "minScore" float8, "maxScore" float8, "meanScore" float8)
     AS 'age_gds', 'age_gds_pagerank_stats'
@@ -189,19 +191,23 @@ CREATE FUNCTION age_gds.pageRank_stats(
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.betweenness_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    sampling_size                 int    DEFAULT NULL,
+    sampling_seed                 int    DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_betweenness_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.closeness_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name          text    DEFAULT NULL,
+    age_graph           text    DEFAULT NULL,
+    node_query          text    DEFAULT NULL,
+    edge_query          text    DEFAULT NULL,
+    use_wasserman_faust boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_closeness_stream'
     LANGUAGE C;
@@ -216,19 +222,24 @@ CREATE FUNCTION age_gds.harmonicCentrality_stream(
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.degree_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    orientation                   text   DEFAULT 'NATURAL',
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_degree_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.eigenvector_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_eigenvector_stream'
     LANGUAGE C;
@@ -245,21 +256,32 @@ CREATE FUNCTION age_gds.hits_stream(
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.articleRank_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    damping_factor                float8 DEFAULT NULL,
+    tolerance                     float8 DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_articlerank_stream'
     LANGUAGE C;
 
--- articulationPoints: uses BiconnectedComponents (no dedicated class in NetworKit)
+-- articulationPoints: uses BiconnectedComponents (no dedicated class in
+-- NetworKit); resulting_component_* columns computed via ConnectedComponents
+-- on a copy of the graph with the articulation point removed.
 CREATE FUNCTION age_gds.articulationPoints_stream(
     graph_name text   DEFAULT NULL,
     age_graph  text   DEFAULT NULL,
     node_query text   DEFAULT NULL,
     edge_query text   DEFAULT NULL
-) RETURNS TABLE("nodeId" bigint)
+) RETURNS TABLE(
+    "nodeId"                  bigint,
+    "resultingComponentCount" int,
+    "resultingComponentMin"   int,
+    "resultingComponentMax"   int
+)
     AS 'age_gds', 'age_gds_articulationpoints_stream'
     LANGUAGE C;
 
