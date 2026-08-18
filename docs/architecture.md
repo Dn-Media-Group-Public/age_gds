@@ -57,9 +57,11 @@ age_gds/
 │       │                       triangleCount, localClusteringCoefficient, modularity
 │       ├── pathfinding.cpp     bfs, dijkstra, deltaStepping, bellmanFord, dfs,
 │       │                       randomWalk, spanningTree, allShortestPaths, maxFlow
-│       ├── similarity.cpp      nodeSimilarity, knn (via JaccardIndex)
+│       ├── similarity.cpp      nodeSimilarity (bounded top-K/bottom-K heaps;
+│       │                       JACCARD/OVERLAP/COSINE), knn (via JaccardIndex)
 │       ├── linkprediction.cpp  adamicAdar, commonNeighbors, preferentialAttachment,
-│       │                       resourceAllocation
+│       │                       resourceAllocation (streaming + single-pair
+│       │                       scalar variants)
 │       └── embedding.cpp       node2vec (via NetworKit::Node2Vec)
 └── third_party/
     └── networkit/              NetworKit git submodule (built as static lib)
@@ -666,6 +668,64 @@ still fully delegated to `NetworKit::Dijkstra`, just invoked once per
 requested target rather than once for the whole graph.
 
 See also: [Plan: Path-finding & Flow Algorithm Parity Fixes](implemented-plans/03-pathfinding-parity.md)
+
+---
+
+## Similarity: bounded top-K/bottom-K heaps (`src/algorithms/similarity.cpp`)
+
+`nodeSimilarity_stream` used to materialize the full `O(n²)` set of
+unordered node pairs before scoring any of them -- the report's flagged
+scalability concern. It now scores each pair inline in the same
+`u`/`v` double loop (or the `source_node_filter`/`target_node_filter` cross
+product, when given) and immediately pushes the result into per-node
+bounded heaps: a size-`top_k` min-heap keeps each source node's highest
+scores seen so far (evict the smallest when a higher score arrives), and a
+size-`bottom_k` max-heap does the mirror image for the lowest scores. This
+bounds memory to `O(n·(top_k+bottom_k))` instead of `O(n²)`, while the
+scoring computation itself is still delegated to
+`NetworKit::JaccardIndex::run(u, v)` (unweighted `JACCARD`) per pair --
+identical numerical results to the pre-plan implementation, just without
+the memory blowup, and with `similarity_cutoff`/`degree_cutoff`/
+`upper_degree_cutoff`/`use_components` as additional pre/post-filters on
+the same loop. `OVERLAP`/`COSINE`/weighted-`JACCARD` are closed-form
+set-arithmetic formulas over `NetworKit::NeighborhoodUtility` (the same
+helper `JaccardIndex` uses internally) and `Graph::degree()`/`Graph::weight()`
+-- not new NetworKit classes, per the plan.
+
+Any directed input graph is converted to an undirected view
+(`NetworKit::GraphTools::toUndirected`) once, up front, applied uniformly
+regardless of `similarity_metric` -- `NetworKit::LinkPredictor::run()`
+(underlying unweighted `JACCARD`) unconditionally throws
+`std::invalid_argument` on a directed graph, while the manual
+`OVERLAP`/`COSINE`/weighted-`JACCARD` formulas would otherwise silently
+follow only out-edges on a directed graph without erroring. Converting
+once, for every metric, keeps results independent of which metric happens
+to be requested.
+
+See also: [Plan: Similarity & Link-Prediction Parity Fixes](implemented-plans/04-similarity-linkprediction-parity.md)
+
+---
+
+## Link prediction: `direction` is a NetworKit gap for non-`'BOTH'` (`src/algorithms/linkprediction.cpp`)
+
+The new single-pair scalar `linkprediction_*` functions accept a
+`direction` parameter (`'BOTH'`/`'OUTGOING'`/`'INCOMING'`) matching Neo4j's
+`gds.alpha.linkprediction.*` config shape, but only `'BOTH'` is actually
+supported. `NetworKit::LinkPredictor::run()` (the base method
+`AdamicAdarIndex`/`CommonNeighborsIndex`/`PreferentialAttachmentIndex`/
+`ResourceAllocationIndex` all inherit) unconditionally throws
+`std::invalid_argument("Only undirected graphs accepted.")` whenever
+`Graph::isDirected()` is true -- there is no directed-aware alternative on
+any of the four classes to delegate an `OUTGOING`/`INCOMING`-restricted
+score to. Passing `direction => 'OUTGOING'` or `'INCOMING'` raises a clear
+SQL error (`ERRCODE_FEATURE_NOT_SUPPORTED`) documenting exactly this,
+rather than silently ignoring the parameter or hand-rolling directed
+neighbor-set arithmetic (forbidden by project rules) -- the same "refuse
+with a clear error" precedent set by `labelPropagation_stream`'s
+`seed_property` handling (see "A NetworKit gap found during this plan"
+above).
+
+See also: [Plan: Similarity & Link-Prediction Parity Fixes](implemented-plans/04-similarity-linkprediction-parity.md)
 
 ---
 

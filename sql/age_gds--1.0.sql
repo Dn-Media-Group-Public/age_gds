@@ -610,27 +610,44 @@ CREATE FUNCTION age_gds.betweenness_write(
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.nodeSimilarity_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text     DEFAULT NULL,
+    age_graph                     text     DEFAULT NULL,
+    node_query                    text     DEFAULT NULL,
+    edge_query                    text     DEFAULT NULL,
+    similarity_cutoff             float8   DEFAULT 1e-42,
+    degree_cutoff                 int      DEFAULT 1,
+    top_k                         int      DEFAULT 10,
+    top_n                         int      DEFAULT 0,
+    relationship_weight_property  text     DEFAULT NULL,
+    upper_degree_cutoff           bigint   DEFAULT 9223372036854775807,
+    bottom_k                      int      DEFAULT 10,
+    bottom_n                      int      DEFAULT 0,
+    source_node_filter            bigint[] DEFAULT NULL,
+    target_node_filter            bigint[] DEFAULT NULL,
+    use_components                boolean  DEFAULT false,
+    similarity_metric             text     DEFAULT 'JACCARD'
 ) RETURNS TABLE(node1 bigint, node2 bigint, similarity float8)
     AS 'age_gds', 'age_gds_nodesimilarity_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.knn_stream(
-    graph_name text DEFAULT NULL,
-    top_k      int  DEFAULT 5,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name         text   DEFAULT NULL,
+    top_k              int    DEFAULT 10,
+    age_graph          text   DEFAULT NULL,
+    node_query         text   DEFAULT NULL,
+    edge_query         text   DEFAULT NULL,
+    similarity_cutoff  float8 DEFAULT 0
 ) RETURNS TABLE("sourceNodeId" bigint, "targetNodeId" bigint, similarity float8, rank int)
     AS 'age_gds', 'age_gds_knn_stream'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------
--- Link prediction (stage 8)
--- Uses NetworKit link predictors; runAll() scores unconnected node pairs.
+-- Link prediction (stage 8; single-pair scalar functions: plan 04)
+-- *_stream uses NetworKit link predictors' runAll() to score every
+-- currently-unconnected node pair. The single-pair scalar functions below
+-- (no _stream suffix) use the same predictor classes' base run(u, v)
+-- method, matching Neo4j GDS's gds.alpha.linkprediction.<name>(node1,
+-- node2, {...}) spot-check shape.
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.linkprediction_adamicAdar_stream(
@@ -667,6 +684,46 @@ CREATE FUNCTION age_gds.linkprediction_resourceAllocation_stream(
     edge_query text DEFAULT NULL
 ) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
     AS 'age_gds', 'age_gds_linkpred_resourceallocation_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_adamicAdar(
+    node1               bigint,
+    node2               bigint,
+    graph_name          text DEFAULT NULL,
+    relationship_query  text DEFAULT NULL,
+    direction           text DEFAULT 'BOTH'
+) RETURNS float8
+    AS 'age_gds', 'age_gds_linkpred_adamicadar'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_commonNeighbors(
+    node1               bigint,
+    node2               bigint,
+    graph_name          text DEFAULT NULL,
+    relationship_query  text DEFAULT NULL,
+    direction           text DEFAULT 'BOTH'
+) RETURNS float8
+    AS 'age_gds', 'age_gds_linkpred_commonneighbors'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_preferentialAttachment(
+    node1               bigint,
+    node2               bigint,
+    graph_name          text DEFAULT NULL,
+    relationship_query  text DEFAULT NULL,
+    direction           text DEFAULT 'BOTH'
+) RETURNS float8
+    AS 'age_gds', 'age_gds_linkpred_preferentialattachment'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_resourceAllocation(
+    node1               bigint,
+    node2               bigint,
+    graph_name          text DEFAULT NULL,
+    relationship_query  text DEFAULT NULL,
+    direction           text DEFAULT 'BOTH'
+) RETURNS float8
+    AS 'age_gds', 'age_gds_linkpred_resourceallocation'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

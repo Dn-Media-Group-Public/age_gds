@@ -17,3 +17,4 @@ Listed in implementation order.
 - [Plan: Centrality Algorithm Parity Fixes](01-centrality-parity.md)
 - [Plan: Community Detection Algorithm Parity Fixes](02-community-detection-parity.md)
 - [Plan: Path-finding & Flow Algorithm Parity Fixes](03-pathfinding-parity.md)
+- [Plan: Similarity & Link-Prediction Parity Fixes](04-similarity-linkprediction-parity.md)
