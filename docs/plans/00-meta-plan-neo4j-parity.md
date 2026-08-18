@@ -49,7 +49,9 @@ implement a specific plan file from scratch). Give it this brief:
 6. Update docs/api.md and docs/architecture.md sections the plan lists under
    "Docs to update", including a "See also" link to the plan once implemented.
 7. Move the plan file from docs/plans/<name>.md to docs/implemented-plans/<name>.md
-   and update docs/implemented-plans/index.md to link it.
+   and update docs/implemented-plans/index.md to link it. This move must land
+   in the same commit as the implementation — do not leave it staged for a
+   separate commit, and do not skip it.
 8. docker stop age_gds_test
 9. Do NOT commit. Report back what changed, and the exact single-sentence
    description of the category implemented (e.g. "centrality algorithm
@@ -63,10 +65,13 @@ so the parent can verify the working tree before committing.
 ## Parent agent steps, after each subagent reports back
 
 1. Run `git status` and `git diff --stat` to confirm the subagent's changes
-   match what it reported — do not commit blind.
+   match what it reported — do not commit blind. Confirm the plan file move
+   (docs/plans/<name>.md → docs/implemented-plans/<name>.md) is included; if
+   the subagent forgot it, do the move yourself before committing.
 2. `git add -A` (or targeted paths if anything unexpected shows up in
    `git status` — investigate before staging, per standard git safety
-   practice).
+   practice). This must include the moved plan file, so it lands in the same
+   commit as the implementation it documents.
 3. Commit with a message that is **exactly one sentence**, naming only the
    category implemented, with **no** Claude/AI attribution, co-author
    trailer, or emoji — e.g.:
