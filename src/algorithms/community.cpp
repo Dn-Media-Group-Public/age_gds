@@ -14,11 +14,15 @@
 #include <networkit/components/StronglyConnectedComponents.hpp>
 #include <networkit/centrality/CoreDecomposition.hpp>
 #include <networkit/centrality/LocalClusteringCoefficient.hpp>
+#include <networkit/structures/Partition.hpp>
 #include <networkit/graph/Graph.hpp>
 #include <networkit/Globals.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 extern "C" {
 #include "postgres.h"
@@ -34,13 +38,18 @@ extern "C" {
 
 #include "catalog/session_cache.h"
 #include "util/srf_helper.h"
+#include "util/weight_override.h"
+#include "util/partition_post.h"
 
-/* helper: emit community partition rows */
+/* helper: emit community partition rows, skipping nodes the partition left
+ * unassigned (NetworKit::none) -- e.g. after filter_min_community_size(). */
 static void emit_partition(SRFState &s,
                             const ProjectedGraph &pg,
                             const NetworKit::Partition &part)
 {
     pg.graph.forNodes([&](NetworKit::node u) {
+        if (!part.contains(u))
+            return;
         int64_t comm = (int64_t)part.subsetOf(u);
         Datum values[2]; bool nulls[2] = {false, false};
         values[0] = Int64GetDatum(pg.id_map.resolve(u));
@@ -60,6 +69,27 @@ static GraphHandle resolve_graph_args(FunctionCallInfo fcinfo)
     return get_or_load_graph(gname, agraph, nq, eq);
 }
 
+// Raises a consistent ereport(ERROR) when a node-property read
+// (seed_property / community_property / triangle_count_property) is
+// requested against a graph whose catalog row predates age_graph/node_query
+// being recorded (pre-existing rows, or live-index graphs created via
+// graph_index(), which does not record node_query -- see
+// docs/architecture.md "Per-call weight override" for the analogous
+// edge_query limitation).
+static void require_node_query(const ProjectedGraph &pg, const char *what)
+{
+    if (pg.age_graph.empty() || pg.node_query.empty())
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("%s requires graph \"%s\" to have its age_graph/node_query "
+                        "recorded in the catalog (re-run graph_project to populate "
+                        "them; graph_index()-created live indices do not currently "
+                        "record node_query)",
+                        what, pg.name.c_str())));
+}
+
+/* ============================================================ C functions */
+
 extern "C" {
 
 PG_FUNCTION_INFO_V1(age_gds_louvain_stream);
@@ -73,33 +103,73 @@ PG_FUNCTION_INFO_V1(age_gds_localclusteringcoefficient_stream);
 PG_FUNCTION_INFO_V1(age_gds_modularity_stats);
 
 /* ---------------------------------------------- louvain_stream ----------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=relationship_weight_property, 5=gamma, 6=max_iterations,
+//             7=recurse, 8=consecutive_ids, 9=min_community_size
 
 Datum age_gds_louvain_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *wprop  = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    double gamma       = PG_ARGISNULL(5) ? 1.0  : PG_GETARG_FLOAT8(5);
+    int    max_iter    = PG_ARGISNULL(6) ? 10   : PG_GETARG_INT32(6);
+    bool   recurse     = PG_ARGISNULL(7) ? true : PG_GETARG_BOOL(7);
+    bool   want_consecutive = PG_ARGISNULL(8) ? false : PG_GETARG_BOOL(8);
+    int    min_comm_size    = PG_ARGISNULL(9) ? 0     : PG_GETARG_INT32(9);
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::PLM algo(pg.graph);
+    // PLM's own default maxIter is 32; louvain_stream's default of 10
+    // documented in docs/api.md as a deliberate deviation.
+    NetworKit::PLM algo(pg.graph, /*refine*/ false, gamma, "balanced",
+                        (NetworKit::count)max_iter, /*turbo*/ true, recurse);
     try { algo.run(); }
     catch (const std::exception &ex) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("Louvain (PLM) failed: %s", ex.what())));
     }
 
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+    if (min_comm_size > 1)
+        filter_min_community_size(part, (size_t)min_comm_size);
+
     Oid types[2] = {INT8OID, INT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
-    emit_partition(s, pg, algo.getPartition());
+    emit_partition(s, pg, part);
     return srf_end(s, fcinfo);
 }
 
 /* ---------------------------------------------- leiden_stream ------------ */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=relationship_weight_property, 5=gamma, 6=iterations
 
 Datum age_gds_leiden_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *wprop  = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    double gamma       = PG_ARGISNULL(5) ? 1.0 : PG_GETARG_FLOAT8(5);
+    int    iterations  = PG_ARGISNULL(6) ? 10  : PG_GETARG_INT32(6);
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::ParallelLeiden algo(pg.graph);
+    // ParallelLeiden's own default `iterations` is 3; leiden_stream's
+    // default of 10 documented in docs/api.md as a deliberate deviation.
+    // Note: NetworKit's `iterations` (repeated full Leiden runs) is not the
+    // same knob as Neo4j's `maxLevels` (coarsening depth) -- see
+    // docs/architecture.md.
+    NetworKit::ParallelLeiden algo(pg.graph, iterations, /*randomize*/ true, gamma);
     try { algo.run(); }
     catch (const std::exception &ex) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
@@ -113,44 +183,125 @@ Datum age_gds_leiden_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- labelPropagation_stream -- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=relationship_weight_property, 5=max_iterations,
+//             6=seed_property, 7=consecutive_ids
+//
+// seed_property is NOT implemented -- see the ereport(ERROR) below for the
+// full explanation. This is a NetworKit API gap discovered during
+// implementation of this plan, beyond the ones the plan's revision already
+// excluded (node_weight_property).
 
 Datum age_gds_labelpropagation_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *wprop  = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    bool has_max_iter  = !PG_ARGISNULL(5);
+    int  max_iter      = has_max_iter ? PG_GETARG_INT32(5) : 0;
+    const char *seed_prop = PG_ARGISNULL(6) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(6));
+    bool want_consecutive = PG_ARGISNULL(7) ? false : PG_GETARG_BOOL(7);
+
+    if (seed_prop)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("labelPropagation_stream: seed_property is not supported"),
+                 errdetail("NetworKit::PLP's baseClustering constructor "
+                           "(PLP(G, baseClustering, theta)) never initializes its "
+                           "private `maxIterations` member -- the vendored header "
+                           "(third_party/networkit/include/networkit/community/PLP.hpp) "
+                           "declares it with no default member initializer, and that "
+                           "constructor's initializer list only sets updateThreshold. "
+                           "PLP::run()'s loop condition `nIterations < maxIterations` "
+                           "therefore reads an uninitialized value on the seeded path, "
+                           "and there is no public setter to fix it after construction. "
+                           "This is a NetworKit API gap, not something age_gds can "
+                           "safely delegate to (undefined behavior) or paper over with "
+                           "hand-written label propagation (forbidden by project rules). "
+                           "Passing seed_property is refused rather than risking UB.")));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::PLP algo(pg.graph);
+    // has_max_iter == false => NetworKit::none for both theta and
+    // maxIterations, matching the previous (pre-plan) unbounded behavior.
+    NetworKit::PLP algo(pg.graph, /*theta*/ NetworKit::none,
+                        has_max_iter ? (NetworKit::count)max_iter : NetworKit::none);
     try { algo.run(); }
     catch (const std::exception &ex) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("LabelPropagation (PLP) failed: %s", ex.what())));
     }
 
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+
     Oid types[2] = {INT8OID, INT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
-    emit_partition(s, pg, algo.getPartition());
+    emit_partition(s, pg, part);
     return srf_end(s, fcinfo);
 }
 
 /* ---------------------------------------------- wcc_stream --------------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=relationship_weight_property, 5=threshold, 6=consecutive_ids
 
 Datum age_gds_wcc_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *wprop  = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    bool   has_threshold = !PG_ARGISNULL(5);
+    double threshold     = has_threshold ? PG_GETARG_FLOAT8(5) : 0.0;
+    bool   want_consecutive = PG_ARGISNULL(6) ? false : PG_GETARG_BOOL(6);
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::ConnectedComponents algo(pg.graph);
+    // threshold: build a filtered *copy* excluding edges below the
+    // threshold weight (same "private copy, never mutate the cache"
+    // pattern as apply_weight_override's reweighted copy). On an
+    // unweighted projection every edge has NetworKit::defaultEdgeWeight
+    // (1.0), so a threshold > 1.0 drops every edge -- document this in
+    // docs/api.md rather than special-casing it here.
+    NetworKit::Graph filtered;
+    const NetworKit::Graph *graph_ptr = &pg.graph;
+    if (has_threshold) {
+        filtered = NetworKit::Graph(pg.graph.upperNodeIdBound(), /*weighted*/ true,
+                                    pg.graph.isDirected());
+        pg.graph.forEdges([&](NetworKit::node u, NetworKit::node v,
+                              NetworKit::edgeweight w) {
+            if (w >= threshold)
+                filtered.addEdge(u, v, w);
+        });
+        graph_ptr = &filtered;
+    }
+
+    NetworKit::ConnectedComponents algo(*graph_ptr);
     try { algo.run(); }
     catch (const std::exception &ex) {
         ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                         errmsg("ConnectedComponents failed: %s", ex.what())));
     }
 
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+
     Oid types[2] = {INT8OID, INT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
     pg.graph.forNodes([&](NetworKit::node u) {
-        int64_t comp = (int64_t)algo.componentOfNode(u);
+        if (!part.contains(u))
+            return;
+        int64_t comp = (int64_t)part.subsetOf(u);
         Datum values[2]; bool nulls[2] = {false, false};
         values[0] = Int64GetDatum(pg.id_map.resolve(u));
         values[1] = Int64GetDatum(comp);
@@ -160,11 +311,14 @@ Datum age_gds_wcc_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- scc_stream --------------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=consecutive_ids
 
 Datum age_gds_scc_stream(PG_FUNCTION_ARGS)
 {
     GraphHandle gh = resolve_graph_args(fcinfo);
     const ProjectedGraph &pg = *gh.pg;
+    bool want_consecutive = PG_ARGISNULL(4) ? false : PG_GETARG_BOOL(4);
 
     NetworKit::StronglyConnectedComponents algo(pg.graph);
     try { algo.run(); }
@@ -173,11 +327,17 @@ Datum age_gds_scc_stream(PG_FUNCTION_ARGS)
                         errmsg("StronglyConnectedComponents failed: %s", ex.what())));
     }
 
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+
     Oid types[2] = {INT8OID, INT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
     pg.graph.forNodes([&](NetworKit::node u) {
-        int64_t comp = (int64_t)algo.componentOfNode(u);
+        if (!part.contains(u))
+            return;
+        int64_t comp = (int64_t)part.subsetOf(u);
         Datum values[2]; bool nulls[2] = {false, false};
         values[0] = Int64GetDatum(pg.id_map.resolve(u));
         values[1] = Int64GetDatum(comp);
@@ -216,11 +376,15 @@ Datum age_gds_kcore_stream(PG_FUNCTION_ARGS)
 
 /* ---------------------------------------------- triangleCount_stream ----- */
 // Uses LocalClusteringCoefficient: triangles_u = LCC(u) * deg*(deg-1)/2
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=max_degree
 
 Datum age_gds_trianglecount_stream(PG_FUNCTION_ARGS)
 {
     GraphHandle gh = resolve_graph_args(fcinfo);
     const ProjectedGraph &pg = *gh.pg;
+    bool    has_max_degree = !PG_ARGISNULL(4);
+    int64_t max_degree     = has_max_degree ? PG_GETARG_INT64(4) : INT64_MAX;
 
     NetworKit::LocalClusteringCoefficient algo(pg.graph);
     try { algo.run(); }
@@ -234,10 +398,17 @@ Datum age_gds_trianglecount_stream(PG_FUNCTION_ARGS)
     SRFState s = srf_begin(fcinfo, 2, types);
 
     pg.graph.forNodes([&](NetworKit::node u) {
-        double deg = (double)pg.graph.degree(u);
-        int64_t triangles = 0;
-        if (deg >= 2.0) {
+        double  deg = (double)pg.graph.degree(u);
+        int64_t triangles;
+        if ((int64_t)pg.graph.degree(u) > max_degree) {
+            // max_degree pre-filter: skip nodes above the cap entirely,
+            // signalled as -1 rather than a computed (and potentially
+            // expensive-to-have-computed) count.
+            triangles = -1;
+        } else if (deg >= 2.0) {
             triangles = (int64_t)std::round(lcc[u] * deg * (deg - 1.0) / 2.0);
+        } else {
+            triangles = 0;
         }
         Datum values[2]; bool nulls[2] = {false, false};
         values[0] = Int64GetDatum(pg.id_map.resolve(u));
@@ -248,20 +419,56 @@ Datum age_gds_trianglecount_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- localClusteringCoefficient */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=triangle_count_property
 
 Datum age_gds_localclusteringcoefficient_stream(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *tc_prop = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::LocalClusteringCoefficient algo(pg.graph);
-    try { algo.run(); }
-    catch (const std::exception &ex) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                        errmsg("LocalClusteringCoefficient failed: %s", ex.what())));
+    std::vector<double> scores;
+
+    if (tc_prop) {
+        // Bypass NetworKit::LocalClusteringCoefficient entirely: use the
+        // precomputed triangle counts read from `tc_prop` and the standard
+        // LCC formula 2*triangles(u) / (deg(u)*(deg(u)-1)) directly.
+        require_node_query(pg, "localClusteringCoefficient_stream's triangle_count_property");
+
+        std::vector<double> triangles;
+        try {
+            triangles = read_node_property_as_values(
+                pg.graph, pg.id_map, pg.age_graph.c_str(), pg.node_query.c_str(),
+                tc_prop, 0.0);
+        } catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("triangle_count_property read failed for graph \"%s\": %s",
+                                   pg.name.c_str(), ex.what())));
+        }
+
+        scores.assign(pg.graph.upperNodeIdBound(), 0.0);
+        pg.graph.forNodes([&](NetworKit::node u) {
+            double deg = (double)pg.graph.degree(u);
+            scores[u] = (deg >= 2.0)
+                ? (2.0 * triangles[u]) / (deg * (deg - 1.0))
+                : 0.0;
+        });
+    } else {
+        NetworKit::LocalClusteringCoefficient algo(pg.graph);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("LocalClusteringCoefficient failed: %s", ex.what())));
+        }
+        scores = algo.scores();
     }
 
-    const auto &scores = algo.scores();
     Oid types[2] = {INT8OID, FLOAT8OID};
     SRFState s = srf_begin(fcinfo, 2, types);
 
@@ -275,21 +482,49 @@ Datum age_gds_localclusteringcoefficient_stream(PG_FUNCTION_ARGS)
 }
 
 /* ---------------------------------------------- modularity_stats --------- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//             4=community_property, 5=relationship_weight_property
 
 Datum age_gds_modularity_stats(PG_FUNCTION_ARGS)
 {
-    GraphHandle gh = resolve_graph_args(fcinfo);
+    const char *gname  = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *agraph = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *nq     = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *eq     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *comm_prop = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    const char *wprop     = PG_ARGISNULL(5) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(5));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
     const ProjectedGraph &pg = *gh.pg;
 
-    NetworKit::PLM plm(pg.graph);
-    try { plm.run(); }
-    catch (const std::exception &ex) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                        errmsg("PLM (modularity) failed: %s", ex.what())));
+    NetworKit::Partition part;
+
+    if (comm_prop) {
+        // community_property: evaluate modularity of a caller-supplied
+        // partition instead of always running an internal PLM first.
+        require_node_query(pg, "modularity_stats's community_property");
+        try {
+            part = read_node_property_as_partition(
+                pg.graph, pg.id_map, pg.age_graph.c_str(), pg.node_query.c_str(),
+                comm_prop);
+        } catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("community_property read failed for graph \"%s\": %s",
+                                   pg.name.c_str(), ex.what())));
+        }
+    } else {
+        NetworKit::PLM plm(pg.graph);
+        try { plm.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("PLM (modularity) failed: %s", ex.what())));
+        }
+        part = plm.getPartition();
     }
 
     NetworKit::Modularity mod;
-    double mod_val = mod.getQuality(plm.getPartition(), pg.graph);
+    double mod_val = mod.getQuality(part, pg.graph);
 
     Oid types[1] = {FLOAT8OID};
     SRFState s = srf_begin(fcinfo, 1, types);

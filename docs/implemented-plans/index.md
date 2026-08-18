@@ -15,3 +15,4 @@ Listed in implementation order.
 - [Plan 10: Cross-Backend Cache Invalidation (Snapshot Version Cache)](10-snapshot-version-cache.md)
 - [Plan: Per-call Relationship Weight Plumbing](00-weight-plumbing.md)
 - [Plan: Centrality Algorithm Parity Fixes](01-centrality-parity.md)
+- [Plan: Community Detection Algorithm Parity Fixes](02-community-detection-parity.md)

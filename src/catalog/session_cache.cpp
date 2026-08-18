@@ -68,6 +68,7 @@ static void load_live_into_cache(const std::string &name,
                                  const char *edges_path,
                                  bool        live,
                                  const std::string &age_graph,
+                                 const std::string &node_query,
                                  const std::string &edge_query)
 {
     IndexDeserializedGraph idg;
@@ -112,6 +113,7 @@ static void load_live_into_cache(const std::string &name,
     pg.edges_file_path  = edges_path;
     pg.edge_file_index  = std::move(idg.edge_file_index);
     pg.age_graph        = age_graph;
+    pg.node_query       = node_query;
     pg.edge_query       = edge_query;
 
     auto [ins_it, ok] = g_cache.emplace(name, std::move(pg));
@@ -157,9 +159,10 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                 std::string efp = pg.edges_file_path;
                 bool        was_live = pg.live;
                 std::string age_graph_saved = pg.age_graph;
+                std::string node_query_saved = pg.node_query;
                 std::string edge_query_saved = pg.edge_query;
                 load_live_into_cache(name, nfp.c_str(), efp.c_str(), was_live,
-                                     age_graph_saved, edge_query_saved);
+                                     age_graph_saved, node_query_saved, edge_query_saved);
                 return g_cache.at(name);
             } else {
                 /* Flat storage: check content_version in the .bin header
@@ -182,6 +185,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                 /* Version mismatch: reload from file */
                 std::string fp = pg.file_path;
                 std::string age_graph_saved = pg.age_graph;
+                std::string node_query_saved = pg.node_query;
                 std::string edge_query_saved = pg.edge_query;
 
                 DeserializedGraph dg;
@@ -213,6 +217,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                 new_pg.content_version = dg.content_version;
                 new_pg.file_path       = fp;
                 new_pg.age_graph       = age_graph_saved;
+                new_pg.node_query      = node_query_saved;
                 new_pg.edge_query      = edge_query_saved;
 
                 g_cache.erase(it);
@@ -229,6 +234,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
     char     nodes_file_path_buf[4096] = {0};
     char     edges_file_path_buf[4096] = {0};
     char     age_graph_buf[4096]       = {0};
+    char     node_query_buf[65536]     = {0};
     char     edge_query_buf[65536]     = {0};
     bool     is_live                   = false;
     bool     is_incremental            = false;
@@ -240,7 +246,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
 
     int ret = SPI_execute_with_args(
         "SELECT file_path, live, nodes_file_path, edges_file_path, incremental, "
-        "       age_graph, edge_query "
+        "       age_graph, node_query, edge_query "
         "FROM age_gds.graphs WHERE name = $1",
         1, argtypes, args, nullptr, true, 1);
 
@@ -298,11 +304,17 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
         if (!isnull)
             strlcpy(age_graph_buf, TextDatumGetCString(d6), sizeof(age_graph_buf));
 
-        /* col 7: edge_query */
+        /* col 7: node_query */
         Datum d7 = SPI_getbinval(SPI_tuptable->vals[0],
                                   SPI_tuptable->tupdesc, 7, &isnull);
         if (!isnull)
-            strlcpy(edge_query_buf, TextDatumGetCString(d7), sizeof(edge_query_buf));
+            strlcpy(node_query_buf, TextDatumGetCString(d7), sizeof(node_query_buf));
+
+        /* col 8: edge_query */
+        Datum d8 = SPI_getbinval(SPI_tuptable->vals[0],
+                                  SPI_tuptable->tupdesc, 8, &isnull);
+        if (!isnull)
+            strlcpy(edge_query_buf, TextDatumGetCString(d8), sizeof(edge_query_buf));
     }
 
     SPI_finish();
@@ -316,7 +328,8 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                             graph_name)));
 
         load_live_into_cache(name, nodes_file_path_buf, edges_file_path_buf, is_live,
-                             std::string(age_graph_buf), std::string(edge_query_buf));
+                             std::string(age_graph_buf), std::string(node_query_buf),
+                             std::string(edge_query_buf));
         return g_cache.at(name);
     }
 
@@ -359,6 +372,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
     pg.content_version = dg.content_version;
     pg.file_path       = file_path_buf;
     pg.age_graph       = age_graph_buf;
+    pg.node_query      = node_query_buf;
     pg.edge_query      = edge_query_buf;
 
     auto [ins_it, ok] = g_cache.emplace(name, std::move(pg));
@@ -442,6 +456,7 @@ GraphHandle get_or_load_graph(
         h.owned->directed     = directed;
         h.owned->weighted     = weighted;
         h.owned->age_graph    = age_graph;
+        h.owned->node_query   = node_query;
         h.owned->edge_query   = edge_query;
         h.owned->approx_bytes = 0;
         h.owned->last_used    = std::chrono::steady_clock::now();

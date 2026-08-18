@@ -31,6 +31,7 @@ struct ProjectedGraph {
     // graphs projected before this field existed (weight_property override
     // will raise an error in that case; re-run graph_project to populate).
     std::string              age_graph;
+    std::string              node_query;
     std::string              edge_query;
 
     // --- Live index fields (populated only when live=true) ---

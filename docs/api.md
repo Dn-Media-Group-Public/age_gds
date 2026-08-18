@@ -51,8 +51,10 @@ for the full design.
 
 Currently available on: `pageRank_stream`, `pageRank_stats`,
 `betweenness_stream`, `degree_stream`, `eigenvector_stream`,
-`articleRank_stream`. Other algorithms adopt the same trailing parameter as
-their own plans are implemented.
+`articleRank_stream`, `louvain_stream`, `leiden_stream`,
+`labelPropagation_stream`, `wcc_stream`, `modularity_stats`. Other
+algorithms adopt the same trailing parameter as their own plans are
+implemented.
 
 Note: passing the exact same property name the graph's projection already
 uses for its `weight` column is a degenerate case for the override's
@@ -62,7 +64,31 @@ than silently no-oping; pick a different property, or don't pass the
 override, in that situation.
 
 See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-weight-plumbing.md),
-[Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md)
+[Plan: Centrality Algorithm Parity Fixes](implemented-plans/01-centrality-parity.md),
+[Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
+
+### Node-property read (`seed_property` / `community_property` / `triangle_count_property`)
+
+A few community-detection functions read a *node* property (rather than a
+relationship property) via the projection's stored `node_query`, in the same
+spirit as the relationship-weight override above:
+
+- **Named/cached graph mode** (`graph_name`): requires the graph's catalog
+  row to have both `age_graph` and `node_query` recorded (populated by
+  `graph_project`; **not** currently populated by `graph_index()` for live
+  indices -- see [Plan: Community Detection Algorithm Parity
+  Fixes](implemented-plans/02-community-detection-parity.md)). Requires
+  `node_query` to follow the convention `RETURN id(<alias>) AS id`, with a
+  single node alias bound in the `MATCH` clause; raises an error otherwise.
+- Nodes without a value for the property default to their own singleton
+  group (never grouped with unrelated nodes), so the result is always a
+  fully valid `NetworKit::Partition`.
+- `modularity_stats`'s `community_property` and
+  `localClusteringCoefficient_stream`'s `triangle_count_property` are
+  implemented this way. `labelPropagation_stream`'s `seed_property` is
+  **not implemented** -- see that function's entry below for why.
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ### nodeId values
 
@@ -713,16 +739,42 @@ All community/structure functions return one row per node.
 
 ```sql
 age_gds.louvain_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    gamma                         float8 DEFAULT 1.0,
+    max_iterations                int    DEFAULT 10,
+    recurse                       boolean DEFAULT true,
+    consecutive_ids               boolean DEFAULT false,
+    min_community_size            int    DEFAULT 0
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
 ```
 
-Louvain community detection. Community IDs are arbitrary non-negative integers.
+Louvain community detection. Community IDs are arbitrary non-negative
+integers unless `consecutive_ids` is set.
+
+- `relationship_weight_property`: see "Relationship weight override" above.
+- `gamma`: `NetworKit::PLM`'s multi-resolution modularity parameter (no
+  direct Neo4j GDS equivalent; the natural granularity knob). `1.0` =
+  standard modularity, `0.0` = one community, `2m` = singleton communities.
+- `max_iterations`: maps to PLM's `maxIter` (max moves per level). **Default
+  changed from PLM's own default of 32 to 10** to match this plan's design;
+  pass `max_iterations => 32` to restore PLM's native default.
+- `recurse`: approximates Neo4j's `maxLevels` -- `true` (default, matches
+  prior behavior) uses PLM's recursive multilevel coarsening; `false` runs a
+  single level only. This is **not** an exact port of `maxLevels` (no
+  numeric cap is exposed), just the closest binary approximation NetworKit
+  exposes -- see `docs/architecture.md`.
+- `consecutive_ids`: renumber community ids to a dense `0..k-1` range via
+  `NetworKit::Partition::compact()`.
+- `min_community_size`: nodes in a community smaller than this are **omitted
+  from the result** (Neo4j semantics: excluded, not merged/reassigned).
 
 **NetworKit class:** `NetworKit::PLM`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -730,16 +782,31 @@ Louvain community detection. Community IDs are arbitrary non-negative integers.
 
 ```sql
 age_gds.leiden_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    gamma                         float8 DEFAULT 1.0,
+    iterations                    int    DEFAULT 10
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
 ```
 
 Leiden community detection (refinement of Louvain).
 
+- `relationship_weight_property`: see "Relationship weight override" above.
+- `gamma`: `NetworKit::ParallelLeiden`'s resolution parameter (direct
+  constructor argument).
+- `iterations`: number of full Leiden runs (`ParallelLeiden`'s own
+  constructor parameter of the same name; **default changed from
+  NetworKit's own default of 3 to 10**). This is only a loose analogue of
+  Neo4j's `maxLevels` -- Neo4j's parameter controls coarsening *depth*
+  within a single run, while NetworKit's `iterations` repeats the *entire*
+  algorithm; they are not the same knob. See `docs/architecture.md`.
+
 **NetworKit class:** `NetworKit::ParallelLeiden`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -747,16 +814,42 @@ Leiden community detection (refinement of Louvain).
 
 ```sql
 age_gds.labelPropagation_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    max_iterations                int    DEFAULT NULL,
+    seed_property                 text   DEFAULT NULL,
+    consecutive_ids               boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
 ```
 
 Label propagation community detection.
 
+- `relationship_weight_property`: see "Relationship weight override" above.
+- `max_iterations`: maps to `NetworKit::PLP`'s `maxIterations` constructor
+  parameter. `NULL` (default) keeps NetworKit's own default (unbounded,
+  subject to its internal convergence heuristic) -- unchanged from prior
+  behavior.
+- `consecutive_ids`: renumber community ids to a dense `0..k-1` range.
+- `seed_property` **is accepted in the signature but always raises
+  `ERRCODE_FEATURE_NOT_SUPPORTED`.** `NetworKit::PLP`'s seeded constructor
+  (`PLP(G, baseClustering, theta)`) never initializes its private
+  `maxIterations` member (confirmed by inspecting the vendored
+  `third_party/networkit/include/networkit/community/PLP.hpp`/`.cpp`), so
+  `run()`'s loop condition reads an uninitialized value on that path, and
+  there is no public setter to fix it after construction. This is a
+  NetworKit API gap discovered while implementing this plan (beyond
+  `node_weight_property`, which the plan's own revision already excluded
+  for a similar reason) -- age_gds refuses to either rely on the resulting
+  undefined behavior or hand-roll seeded label propagation, both of which
+  are against project rules. `node_weight_property` is dropped from scope
+  entirely for the same underlying reason (see the plan doc).
+
 **NetworKit class:** `NetworKit::PLP`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -764,17 +857,33 @@ Label propagation community detection.
 
 ```sql
 age_gds.wcc_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    threshold                     float8 DEFAULT NULL,
+    consecutive_ids               boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, "componentId" bigint)
 ```
 
 Weakly connected components. All nodes in the same component share the same
 `componentId`.
 
+- `relationship_weight_property`: see "Relationship weight override" above;
+  applied *before* the `threshold` filter, so the filter sees the
+  overridden weights.
+- `threshold`: builds a private, filtered *copy* of the graph excluding
+  every edge whose weight is below `threshold`, then runs
+  `NetworKit::ConnectedComponents` on the copy (same "never mutate the
+  cached graph" pattern as the weight-override copy). On an unweighted
+  projection every edge has `NetworKit::defaultEdgeWeight` (`1.0`), so a
+  `threshold > 1.0` drops every edge.
+- `consecutive_ids`: renumber component ids to a dense `0..k-1` range.
+
 **NetworKit class:** `NetworKit::ConnectedComponents`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -782,16 +891,21 @@ Weakly connected components. All nodes in the same component share the same
 
 ```sql
 age_gds.scc_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name       text    DEFAULT NULL,
+    age_graph        text    DEFAULT NULL,
+    node_query       text    DEFAULT NULL,
+    edge_query       text    DEFAULT NULL,
+    consecutive_ids  boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, "componentId" bigint)
 ```
 
 Strongly connected components.
 
+- `consecutive_ids`: renumber component ids to a dense `0..k-1` range.
+
 **NetworKit class:** `NetworKit::StronglyConnectedComponents`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -817,17 +931,24 @@ belongs to the k-core.
 
 ```sql
 age_gds.triangleCount_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL,
+    max_degree bigint DEFAULT 9223372036854775807
 ) RETURNS TABLE("nodeId" bigint, "triangleCount" bigint)
 ```
 
 Per-node triangle count. Computed as `round(lcc * deg * (deg - 1) / 2)`.
 Nodes with degree < 2 return 0.
 
+- `max_degree`: nodes whose degree exceeds `max_degree` return `-1` instead
+  of a computed count (pre-filter, matching Neo4j GDS semantics for
+  high-degree hub nodes).
+
 **NetworKit class:** `NetworKit::LocalClusteringCoefficient`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -835,17 +956,28 @@ Nodes with degree < 2 return 0.
 
 ```sql
 age_gds.localClusteringCoefficient_stream(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name              text DEFAULT NULL,
+    age_graph               text DEFAULT NULL,
+    node_query              text DEFAULT NULL,
+    edge_query              text DEFAULT NULL,
+    triangle_count_property text DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, coefficient float8)
 ```
 
 Local clustering coefficient: fraction of existing triangles among all possible
 triangles through each node. Range [0.0, 1.0].
 
-**NetworKit class:** `NetworKit::LocalClusteringCoefficient`
+- `triangle_count_property`: when given, bypasses
+  `NetworKit::LocalClusteringCoefficient` entirely and computes
+  `2 * triangles(u) / (deg(u) * (deg(u) - 1))` directly from a named,
+  precomputed per-node triangle-count property (read via the projection's
+  stored `node_query` -- see "Node-property read" above). Nodes with
+  degree < 2 return 0.
+
+**NetworKit class:** `NetworKit::LocalClusteringCoefficient` (unless
+`triangle_count_property` is given)
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 
@@ -853,18 +985,29 @@ triangles through each node. Range [0.0, 1.0].
 
 ```sql
 age_gds.modularity_stats(
-    graph_name text DEFAULT NULL,
-    age_graph  text DEFAULT NULL,
-    node_query text DEFAULT NULL,
-    edge_query text DEFAULT NULL
+    graph_name                    text DEFAULT NULL,
+    age_graph                     text DEFAULT NULL,
+    node_query                    text DEFAULT NULL,
+    edge_query                    text DEFAULT NULL,
+    community_property            text DEFAULT NULL,
+    relationship_weight_property  text DEFAULT NULL
 ) RETURNS TABLE(modularity float8)
 ```
 
-Returns the modularity score of the Louvain partition. Runs PLM internally to
-obtain the partition, then evaluates it with `NetworKit::Modularity::getQuality`.
+Returns the modularity score of a partition. Without `community_property`,
+runs PLM internally to obtain the partition (unchanged prior behavior; note
+the plan's design doc describes this parameter as conceptually "required" for
+the closable gap it targets, but it is `DEFAULT NULL` here so existing calls
+with no arguments keep working). With `community_property`, evaluates the
+named, precomputed per-node community-label property instead (read via the
+projection's stored `node_query` -- see "Node-property read" above).
+`relationship_weight_property`: see "Relationship weight override" above.
 Returns one row.
 
-**NetworKit classes:** `NetworKit::PLM`, `NetworKit::Modularity`
+**NetworKit classes:** `NetworKit::PLM` (unless `community_property` is
+given), `NetworKit::Modularity`
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
 
 ---
 

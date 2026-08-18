@@ -69,6 +69,7 @@ void apply_weight_override(GraphHandle &gh, const char *weight_property)
     copy.last_used       = pg.last_used;
     copy.live           = pg.live;
     copy.age_graph      = pg.age_graph;
+    copy.node_query     = pg.node_query;
     copy.edge_query     = pg.edge_query;
 
     gh.owned.emplace(std::move(copy));

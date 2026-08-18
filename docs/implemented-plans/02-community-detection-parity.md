@@ -27,15 +27,21 @@ Excluded (❌, out of scope): Louvain `tolerance`/`includeIntermediateCommunitie
    10` (loosely analogous to `maxLevels`, document the semantic difference —
    Neo4j's `maxLevels` is coarsening depth, NetworKit's `iterations` is
    repeated full Leiden runs).
-3. **`labelPropagation_stream`**: add `max_iterations integer DEFAULT 10`
-   (direct `PLP` constructor param), `relationship_weight_property`,
-   `node_weight_property text DEFAULT NULL` (same weight-property read
-   mechanism, applied to node weights instead of edge weights — needs a
-   small extension: read a named *node* property via SPI into a
-   `std::vector<double>` keyed by `nk::node`, used for PLP tie-breaking),
+3. **`labelPropagation_stream`**: add `relationship_weight_property`,
    `seed_property text DEFAULT NULL` (read a named node property into a
    `NetworKit::Partition`, pass as `baseClustering` to `PLP(G, baseClustering,
    theta)`), `consecutive_ids boolean DEFAULT false`.
+   `node_weight_property` is **dropped from scope** — NetworKit's `Graph`
+   has no node-weight concept at all (only edge weights), and no
+   community-detection class accepts a node-weight parameter, so there is
+   nothing to delegate to; implementing it ourselves would mean hand-rolling
+   tie-breaking logic, which is forbidden by project rules.
+   `max_iterations` is **mutually exclusive with `seed_property`**: NetworKit's
+   `PLP(G, baseClustering, theta)` constructor (used when `seed_property` is
+   given) has no `maxIterations` parameter, while `PLP(G, theta,
+   maxIterations)` (used when `seed_property` is `NULL`) has no
+   `baseClustering` parameter. If both are supplied non-NULL, raise a SQL
+   error rather than silently ignoring one.
 4. **`wcc_stream`**: add `relationship_weight_property`, `threshold float8
    DEFAULT NULL` (build the loaded graph excluding edges below this weight —
    implemented as a filtered graph copy before running
@@ -70,6 +76,17 @@ Excluded (❌, out of scope): Louvain `tolerance`/`includeIntermediateCommunitie
   NodeIdMap&)` — shared by `seedProperty` (Louvain — actually excluded above
   since PLM has no seed constructor; used only by `labelPropagation_stream`'s
   `seed_property`) and `modularity_stats`'s `community_property`.
+
+**Additional plumbing required** (not previously listed): `seed_property`,
+`community_property`, and `triangle_count_property` all need a per-call
+node-property read for named/cached graphs. `ProjectedGraph` (in
+`src/catalog/session_cache.h`) currently stores `age_graph`/`edge_query`
+(added by plan 00) but not `node_query`, even though `age_gds.graphs`
+already has a `node_query` column. Add a `node_query` field to
+`ProjectedGraph` and populate it everywhere `edge_query` is populated
+(cache miss, flat-storage version-mismatch reload, incremental reload, and
+the anonymous-load path in `session_cache.cpp`), so
+`read_node_property_as_partition` has a query to run.
 
 ## Implementation order
 

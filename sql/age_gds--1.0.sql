@@ -290,46 +290,63 @@ CREATE FUNCTION age_gds.articulationPoints_stream(
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.louvain_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    gamma                         float8 DEFAULT 1.0,
+    max_iterations                int    DEFAULT 10,
+    recurse                       boolean DEFAULT true,
+    consecutive_ids               boolean DEFAULT false,
+    min_community_size            int    DEFAULT 0
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_louvain_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.leiden_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    gamma                         float8 DEFAULT 1.0,
+    iterations                    int    DEFAULT 10
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_leiden_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.labelPropagation_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    max_iterations                int    DEFAULT NULL,
+    seed_property                 text   DEFAULT NULL,
+    consecutive_ids               boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_labelpropagation_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.wcc_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    threshold                     float8 DEFAULT NULL,
+    consecutive_ids               boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, "componentId" bigint)
     AS 'age_gds', 'age_gds_wcc_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.scc_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name       text   DEFAULT NULL,
+    age_graph        text   DEFAULT NULL,
+    node_query       text   DEFAULT NULL,
+    edge_query       text   DEFAULT NULL,
+    consecutive_ids  boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, "componentId" bigint)
     AS 'age_gds', 'age_gds_scc_stream'
     LANGUAGE C;
@@ -347,25 +364,29 @@ CREATE FUNCTION age_gds.triangleCount_stream(
     graph_name text   DEFAULT NULL,
     age_graph  text   DEFAULT NULL,
     node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    edge_query text   DEFAULT NULL,
+    max_degree bigint DEFAULT 9223372036854775807
 ) RETURNS TABLE("nodeId" bigint, "triangleCount" bigint)
     AS 'age_gds', 'age_gds_trianglecount_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.localClusteringCoefficient_stream(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name              text   DEFAULT NULL,
+    age_graph               text   DEFAULT NULL,
+    node_query              text   DEFAULT NULL,
+    edge_query              text   DEFAULT NULL,
+    triangle_count_property text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, coefficient float8)
     AS 'age_gds', 'age_gds_localclusteringcoefficient_stream'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.modularity_stats(
-    graph_name text   DEFAULT NULL,
-    age_graph  text   DEFAULT NULL,
-    node_query text   DEFAULT NULL,
-    edge_query text   DEFAULT NULL
+    graph_name                    text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL,
+    community_property             text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE(modularity float8)
     AS 'age_gds', 'age_gds_modularity_stats'
     LANGUAGE C;

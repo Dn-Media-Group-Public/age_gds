@@ -33,6 +33,7 @@ add_library(age_gds MODULE
     src/util/writeback.cpp
     src/util/weight_override.cpp
     src/util/scaler.cpp
+    src/util/partition_post.cpp
     src/algorithms/centrality.cpp
     src/algorithms/community.cpp
     src/algorithms/pathfinding.cpp

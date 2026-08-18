@@ -404,6 +404,108 @@ See also: [Plan: Per-call Relationship Weight Plumbing](implemented-plans/00-wei
 
 ---
 
+## Per-call node-property read
+
+Mirroring the weight-override mechanism above, `ProjectedGraph`
+(`src/catalog/session_cache.h`) also caches the projection's `node_query`
+text (`age_gds.graphs.node_query`, populated by `graph_project`), alongside
+`age_graph`/`edge_query`, in every place `edge_query` is populated:
+`session_cache_get`'s cache-miss SPI lookup, its flat-storage
+version-mismatch reload, its incremental/live-index reload, and the
+anonymous-load path in `get_or_load_graph()`. `apply_weight_override()`'s
+reweighted-copy path also carries `node_query` over so a single call can
+combine `relationship_weight_property` with a node-property read.
+
+`graph_index()`-created live indices do **not** currently record
+`node_query` in their catalog INSERT (only `age_graph`/`edge_query`), so
+node-property reads against a pure `graph_index()` graph raise the same
+"re-run graph_project to populate them" error as a pre-existing catalog row
+would — a known limitation, not fixed as part of this plan (out of its
+declared scope; see
+[Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)).
+
+`src/util/partition_post.h`/`.cpp` provides the shared read mechanism:
+
+- `read_node_property_as_partition()` re-runs `node_query` (substituting its
+  `RETURN id(<alias>) AS id` projection for `RETURN id(<alias>) AS id,
+  <alias>.<property> AS value`, the same alias-detection-and-substitution
+  approach `reweight_from_property()` uses for edge queries) and builds a
+  `NetworKit::Partition`. Nodes without a value get their own singleton
+  community; distinct property values map to fresh ids starting at
+  `graph.upperNodeIdBound()` so they can never collide with a default
+  singleton id, and so `Partition::upperBound()` stays proportional to graph
+  size rather than to unrelated raw property values. Used by
+  `labelPropagation_stream`'s (rejected — see below) `seed_property` design
+  and `modularity_stats`'s `community_property`.
+- `read_node_property_as_values()` uses the same query mechanism but returns
+  a raw per-node numeric value instead of a partition, for
+  `localClusteringCoefficient_stream`'s `triangle_count_property`.
+- `consecutive_ids()`/`filter_min_community_size()` are thin wrappers over
+  `NetworKit::Partition::compact()`/`::remove()` — no hand-rolled
+  renumbering or filtering logic. `filter_min_community_size` must run
+  *after* any `consecutive_ids()` pass on the same `Partition`: `remove()`
+  sets an entry to `NetworKit::none`, and `compact()` run afterwards could
+  attempt to renumber it. `emit_partition()` (in
+  `src/algorithms/community.cpp`) skips any node for which
+  `Partition::contains()` is false, so filtered-out nodes are omitted from
+  the result set (Neo4j `minCommunitySize` semantics: excluded, not
+  reassigned).
+
+### A NetworKit gap found during this plan: `labelPropagation_stream`'s `seed_property`
+
+`docs/plans/02-community-detection-parity.md`'s design called for
+`seed_property` to read a node property into a `NetworKit::Partition` and
+pass it as `NetworKit::PLP`'s `baseClustering` constructor argument
+(`PLP(G, baseClustering, theta)`). Inspecting the vendored
+`third_party/networkit/include/networkit/community/PLP.hpp`/`.cpp` found
+that this constructor's initializer list sets only `updateThreshold` —
+`maxIterations` (declared `count maxIterations;` with no default member
+initializer) is never assigned on this path, and `PLP::run()`'s loop
+condition (`nIterations < maxIterations`) reads it unconditionally. There is
+no public setter to fix it after construction (`PLP` only exposes
+`setUpdateThreshold()`). Using this constructor is therefore relying on an
+uninitialized read — undefined behavior, not delegation to a real
+NetworKit algorithm.
+
+Per this project's rules (never hand-roll a graph algorithm, never rely on
+undefined behavior to fake correctness), `seed_property` is accepted in
+`labelPropagation_stream`'s SQL signature (for forward compatibility/API
+shape) but always raises `ERRCODE_FEATURE_NOT_SUPPORTED` when non-NULL. This
+is the same category of gap as `node_weight_property` (already excluded
+from this plan's scope for a different but related reason: NetworKit's
+`Graph` has no node-weight concept at all).
+
+See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
+
+---
+
+## Community detection: `recurse`/`iterations` are approximations, not exact ports
+
+Two parameters added by
+[Plan: Community Detection Algorithm Parity Fixes](implemented-plans/02-community-detection-parity.md)
+stand in for a Neo4j GDS parameter without being numerically equivalent to
+it — **do not treat them as exact ports**:
+
+- `louvain_stream`'s `recurse` (passed straight through to `NetworKit::PLM`'s
+  own `recurse` constructor argument) approximates Neo4j's `maxLevels`:
+  `true` (default) is PLM's normal recursive multilevel coarsening, `false`
+  is a single level only. There is no numeric cap in between — `maxLevels =
+  3` has no NetworKit equivalent exposed via this boolean.
+- `leiden_stream`'s `iterations` (passed straight through to
+  `NetworKit::ParallelLeiden`'s own `iterations` constructor argument) is
+  only a loose analogue of Neo4j's `maxLevels`: Neo4j's parameter bounds
+  coarsening *depth* within one Leiden run, while NetworKit's `iterations`
+  repeats the *entire* algorithm some number of times. They answer
+  different questions and happen to share the "how much work" flavor, not
+  the same mechanism.
+
+Both defaults were also changed from the underlying NetworKit class's own
+constructor default (`PLM`'s `maxIter` default is 32, not 10;
+`ParallelLeiden`'s `iterations` default is 3, not 10) to the values this
+plan settled on — see `docs/api.md` §5 for each function's exact wording.
+
+---
+
 ## How algorithm functions work
 
 All algorithm SQL functions follow the same pattern:
