@@ -62,7 +62,8 @@ age_gds/
 │       ├── linkprediction.cpp  adamicAdar, commonNeighbors, preferentialAttachment,
 │       │                       resourceAllocation (streaming + single-pair
 │       │                       scalar variants)
-│       └── embedding.cpp       node2vec (via NetworKit::Node2Vec)
+│       └── embedding.cpp       node2vec (via NetworKit::Embedding::
+│                               BiasedRandomWalk + learnEmbeddings)
 └── third_party/
     └── networkit/              NetworKit git submodule (built as static lib)
 ```
@@ -593,11 +594,10 @@ arguments).
 
 `randomWalk_stream` delegates to `NetworKit::Embedding::BiasedRandomWalk` --
 the same P/Q-biased ("return"/"in-out") walker that `NetworKit::Node2Vec`
-(used by `embedding.cpp`'s `node2vec_stream`) wraps internally. Node2Vec's
-*public*, installed header (`include/networkit/embedding/Node2Vec.hpp`) only
-exposes the trained embedding vectors via `getFeatures()`, not the
-underlying walks -- so it cannot serve `randomWalk_stream`, which needs the
-node sequences themselves.
+wraps internally. Node2Vec's *public*, installed header
+(`include/networkit/embedding/Node2Vec.hpp`) only exposes the trained
+embedding vectors via `getFeatures()`, not the underlying walks -- so it
+cannot serve `randomWalk_stream`, which needs the node sequences themselves.
 
 `BiasedRandomWalk.hpp`/`AliasSampler.hpp` live beside their own `.cpp` files
 in `third_party/networkit/networkit/cpp/embedding/` rather than under
@@ -613,6 +613,24 @@ to `age_gds`'s private include path with a comment explaining why.
 `Graph::forNeighborsOf`'s `weight` callback parameter, so
 `relationship_weight_property` (via `apply_weight_override()`, plan 00)
 works transparently.
+
+**Plan 05 update:** `embedding.cpp`'s `node2vec_stream` no longer goes
+through `NetworKit::Node2Vec` at all -- it now calls
+`NetworKit::Embedding::BiasedRandomWalk` and
+`NetworKit::Embedding::learnEmbeddings` directly, the same two primitives
+`Node2Vec::run()` itself calls internally
+(`third_party/networkit/networkit/cpp/embedding/Node2Vec.cpp`). This was
+required to expose `window_size`/`iterations` as SQL parameters: `Node2Vec::
+run()` hardcodes `winSize=10, iterations=1` in its call to
+`learnEmbeddings()` and does not accept them as constructor arguments, and
+`Node2Vec` is declared `final` so it cannot be subclassed to override
+`run()`. `learnEmbeddings()` (declared in the same non-installed
+`LearnEmbedding.hpp` covered by the include-path addition above) is the
+literal skip-gram trainer NetworKit ships; calling it directly is not a
+hand-rolled algorithm, just skipping a wrapper class that hides two of its
+parameters. `node2vec_stream` replicates the contiguous-node-id and
+no-isolated-nodes checks `Node2Vec`'s constructor used to perform, since
+those checks are no longer run implicitly.
 
 ### Shared flow-graph transforms (`src/algorithms/flow_common.h`/`.cpp`)
 

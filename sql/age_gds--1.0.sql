@@ -732,15 +732,18 @@ CREATE FUNCTION age_gds.linkprediction_resourceAllocation(
 -- -------------------------------------------------------------------------
 
 CREATE FUNCTION age_gds.node2vec_stream(
-    graph_name      text    DEFAULT NULL,
-    embedding_dim   int     DEFAULT 64,
-    walk_length     int     DEFAULT 80,
-    walks_per_node  int     DEFAULT 10,
-    p               float8  DEFAULT 1.0,
-    q               float8  DEFAULT 1.0,
-    age_graph       text    DEFAULT NULL,
-    node_query      text    DEFAULT NULL,
-    edge_query      text    DEFAULT NULL
+    graph_name                    text    DEFAULT NULL,
+    embedding_dim                 int     DEFAULT 128,
+    walk_length                   int     DEFAULT 80,
+    walks_per_node                int     DEFAULT 10,
+    p                             float8  DEFAULT 1.0,
+    q                             float8  DEFAULT 1.0,
+    age_graph                     text    DEFAULT NULL,
+    node_query                    text    DEFAULT NULL,
+    edge_query                    text    DEFAULT NULL,
+    relationship_weight_property  text    DEFAULT NULL,
+    window_size                   int     DEFAULT 10,
+    iterations                    int     DEFAULT 1
 ) RETURNS TABLE("nodeId" bigint, embedding float8[])
     AS 'age_gds', 'age_gds_node2vec_stream'
     LANGUAGE C;

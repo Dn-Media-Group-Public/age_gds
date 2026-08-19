@@ -18,3 +18,4 @@ Listed in implementation order.
 - [Plan: Community Detection Algorithm Parity Fixes](02-community-detection-parity.md)
 - [Plan: Path-finding & Flow Algorithm Parity Fixes](03-pathfinding-parity.md)
 - [Plan: Similarity & Link-Prediction Parity Fixes](04-similarity-linkprediction-parity.md)
+- [Plan: Embedding Algorithm Parity Fixes](05-embeddings-parity.md)
