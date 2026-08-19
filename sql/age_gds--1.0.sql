@@ -391,6 +391,36 @@ CREATE FUNCTION age_gds.modularity_stats(
     AS 'age_gds', 'age_gds_modularity_stats'
     LANGUAGE C;
 
+-- gds.conductance: NetworKit::Conductance::getQuality(), which requires a
+-- literal 2-partition (community_property values must be exactly 0 or 1
+-- for every node; any other value errors rather than being silently
+-- coerced -- see src/algorithms/community.cpp for why plan 02's
+-- read_node_property_as_partition() isn't reused directly here).
+CREATE FUNCTION age_gds.conductance_stats(
+    graph_name                    text   DEFAULT NULL,
+    community_property            text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL
+) RETURNS TABLE(conductance float8)
+    AS 'age_gds', 'age_gds_conductance_stats'
+    LANGUAGE C;
+
+-- gds.cliqueCounting: NetworKit::MaximalCliques(G, callback), counted and
+-- bucketed by clique size as cliques are emitted by the callback. Counts
+-- *maximal* cliques only (NetworKit has no all-cliques-of-every-size
+-- primitive); SUM(count) over the result rows gives the total maximal
+-- clique count.
+CREATE FUNCTION age_gds.cliqueCounting_stats(
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
+) RETURNS TABLE(clique_size int, count bigint)
+    AS 'age_gds', 'age_gds_cliquecounting_stats'
+    LANGUAGE C;
+
 -- -------------------------------------------------------------------------
 -- Path-finding algorithms
 -- -------------------------------------------------------------------------
@@ -576,6 +606,47 @@ CREATE FUNCTION age_gds.minCostMaxFlow_stats(
     node_capacity_property  text     DEFAULT NULL
 ) RETURNS TABLE(total_cost float8, "computeMillis" bigint)
     AS 'age_gds', 'age_gds_mincostmaxflow_stats'
+    LANGUAGE C;
+
+-- gds.dag.topologicalSort: NetworKit::TopologicalSort. max_distance is a
+-- linear DP pass over the computed order, only populated (non-NULL) when
+-- compute_max_distance_from_source is true. Errors if the graph is not a
+-- directed acyclic graph.
+CREATE FUNCTION age_gds.topologicalSort_stream(
+    graph_name                     text    DEFAULT NULL,
+    compute_max_distance_from_source boolean DEFAULT false,
+    age_graph                      text    DEFAULT NULL,
+    node_query                     text    DEFAULT NULL,
+    edge_query                     text    DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, "sortIndex" int, "maxDistance" int)
+    AS 'age_gds', 'age_gds_topologicalsort_stream'
+    LANGUAGE C;
+
+-- gds.dag.longestPath: NetworKit::TopologicalSort + weighted DP pass
+-- (dist[v] = max over predecessors u of dist[u] + weight(u,v)). Errors if
+-- the graph is not a directed acyclic graph.
+CREATE FUNCTION age_gds.longestPath_stream(
+    graph_name                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, distance float8)
+    AS 'age_gds', 'age_gds_longestpath_stream'
+    LANGUAGE C;
+
+-- gds.bridges: no dedicated NetworKit class; derived from
+-- BiconnectedComponents (same class articulationPoints_stream uses) -- an
+-- edge is a bridge iff it is the sole edge of its biconnected component,
+-- checked here as "the component's node set has exactly 2 members" (see
+-- src/algorithms/pathfinding.cpp for the parallel-edge caveat this implies).
+CREATE FUNCTION age_gds.bridges_stream(
+    graph_name text   DEFAULT NULL,
+    age_graph  text   DEFAULT NULL,
+    node_query text   DEFAULT NULL,
+    edge_query text   DEFAULT NULL
+) RETURNS TABLE(src bigint, dst bigint)
+    AS 'age_gds', 'age_gds_bridges_stream'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

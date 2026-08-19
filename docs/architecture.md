@@ -54,9 +54,11 @@ age_gds/
 │       ├── centrality.cpp      pageRank, betweenness, closeness, harmonic, degree,
 │       │                       eigenvector, HITS, articleRank, articulationPoints
 │       ├── community.cpp       louvain, leiden, labelPropagation, wcc, scc, kCore,
-│       │                       triangleCount, localClusteringCoefficient, modularity
+│       │                       triangleCount, localClusteringCoefficient, modularity,
+│       │                       conductance, cliqueCounting
 │       ├── pathfinding.cpp     bfs, dijkstra, deltaStepping, bellmanFord, dfs,
-│       │                       randomWalk, spanningTree, allShortestPaths, maxFlow
+│       │                       randomWalk, spanningTree, allShortestPaths, maxFlow,
+│       │                       topologicalSort, longestPath, bridges
 │       ├── similarity.cpp      nodeSimilarity (bounded top-K/bottom-K heaps;
 │       │                       JACCARD/OVERLAP/COSINE), knn (via JaccardIndex)
 │       ├── linkprediction.cpp  adamicAdar, commonNeighbors, preferentialAttachment,
@@ -482,6 +484,38 @@ See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/0
 
 ---
 
+## `conductance_stats`/`cliqueCounting_stats`: new community-adjacent procedures (`src/algorithms/community.cpp`)
+
+`conductance_stats` calls `NetworKit::Conductance::getQuality(partition, G)`,
+which requires a literal 2-partition: `Conductance.cpp` indexes fixed-size
+two-element arrays (`vol[2]`, etc.) directly by each node's cluster id with
+no bounds check, so ids outside `{0,1}` are undefined behavior, not a
+caught error. This is incompatible with plan 02's
+`read_node_property_as_partition()`, which deliberately assigns *internal*
+dense subset ids offset above `graph.upperNodeIdBound()` rather than
+passing property values straight through as subset ids (see the
+"Node-property read" helper section above) — reusing it here would build a
+`Partition` that silently violates `Conductance`'s precondition.
+`conductance_stats` instead reuses `read_node_property_as_values()` (the
+other plan 02 helper, already used by `localClusteringCoefficient_stream`)
+to read the raw numeric `community_property`, validates every node's value
+is exactly `0.0` or `1.0` (erroring — `ERRCODE_INVALID_PARAMETER_VALUE` —
+on any other value or a missing one), and constructs the
+`NetworKit::Partition` directly from those literal ids.
+
+`cliqueCounting_stats` calls `NetworKit::MaximalCliques(G, callback)`
+(the same class already vetted in
+`docs/neo4j-gds-parity-report.md` §7) and buckets counts by clique size as
+the callback fires — no materialization of the full clique list. This
+counts *maximal* cliques only: NetworKit has no primitive enumerating every
+clique of every size (maximal or not), so the result is not an exact port
+of Neo4j GDS's per-node `counts` semantics, just the closest thing
+`MaximalCliques` can produce as a thin wrapper.
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
+
+---
+
 ## Community detection: `recurse`/`iterations` are approximations, not exact ports
 
 Two parameters added by
@@ -549,6 +583,7 @@ comment in both the SQL DDL and the C++ source.
 | `hits_stream`            | HITS (Kleinberg)    | `EigenvectorCentrality`      | Both auth and hub return the same eigenvector score; equivalent for undirected graphs |
 | `articleRank_stream`     | ArticleRank         | `PageRank` (damping=0.85)    | No distinct ArticleRank class in NetworKit |
 | `articulationPoints_stream` | Articulation points | `BiconnectedComponents`   | A node is an articulation point iff `getComponentsOfNode(u).size() > 1` |
+| `bridges_stream`         | Bridges              | `BiconnectedComponents`   | An edge is a bridge iff its biconnected component's node set has exactly 2 members (see "New graph-theoretic procedures" below) |
 | `deltaStepping_stream`   | Delta-stepping SSSP | `Dijkstra`                   | NetworKit has no `DeltaStepping` class (no `delta` parameter to add; tracked in `docs/neo4j-gds-parity-external-libs.md`, not a plan-03 item) |
 | `triangleCount_stream`   | Triangle count      | `LocalClusteringCoefficient` | Triangles computed as `round(lcc * deg * (deg-1) / 2)` |
 | `betweenness_stream` (`sampling_size` set) | Approximate betweenness | `ApproxBetweenness` | `sampling_size` maps to `epsilon = 1/sqrt(sampling_size)`, fixed `delta = 0.1`; `sampling_seed` calls `Aux::Random::setSeed()` first. Requires an undirected graph — its diameter-estimation step does not support directed input (a NetworKit limitation, see `test/sql/12-centrality-parity.sql`) |
@@ -686,6 +721,34 @@ still fully delegated to `NetworKit::Dijkstra`, just invoked once per
 requested target rather than once for the whole graph.
 
 See also: [Plan: Path-finding & Flow Algorithm Parity Fixes](implemented-plans/03-pathfinding-parity.md)
+
+### New graph-theoretic procedures: `topologicalSort_stream`/`longestPath_stream`/`bridges_stream`
+
+`topologicalSort_stream` and `longestPath_stream` both construct
+`NetworKit::TopologicalSort(pg.graph)` and call `.run()`. That constructor
+throws `std::runtime_error` if the graph is not directed, and `run()`
+throws `std::runtime_error("Error: the input graph has cycles.")` if the
+graph is not acyclic -- both cases are caught and re-raised as
+`ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ...)` rather than
+producing a partial or silently wrong order.
+
+Both functions then walk `TopologicalSort::getResult()`'s node order once,
+computing a per-node distance with a plain array-reduction DP pass (no new
+traversal algorithm): `topologicalSort_stream`'s optional `maxDistance`
+column increments by 1 per hop (`dist[v] = max(dist[u]) + 1`, over
+`pg.graph.forNeighborsOf(u, ...)`, which only visits outgoing edges for
+directed graphs); `longestPath_stream` accumulates real edge weight
+instead (`dist[v] = max(dist[u] + weight(u,v))`). Both leave source nodes
+(no predecessors) at distance 0.
+
+`bridges_stream` derives from `NetworKit::BiconnectedComponents` --
+already used by `articulationPoints_stream` in `centrality.cpp` -- with no
+new NetworKit dependency: an edge is a bridge iff it is the sole edge of
+its biconnected component, which is exactly the case where that
+component's `getComponents()` node set has 2 members. One-pass filter over
+`BiconnectedComponents::getComponents()`.
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
 
 ---
 

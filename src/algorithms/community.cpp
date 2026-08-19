@@ -10,16 +10,22 @@
 #include <networkit/community/ParallelLeiden.hpp>
 #include <networkit/community/PLP.hpp>
 #include <networkit/community/Modularity.hpp>
+#include <networkit/community/Conductance.hpp>
 #include <networkit/components/ConnectedComponents.hpp>
 #include <networkit/components/StronglyConnectedComponents.hpp>
 #include <networkit/centrality/CoreDecomposition.hpp>
 #include <networkit/centrality/LocalClusteringCoefficient.hpp>
+#include <networkit/clique/MaximalCliques.hpp>
 #include <networkit/structures/Partition.hpp>
 #include <networkit/graph/Graph.hpp>
 #include <networkit/Globals.hpp>
 
+#include <cinttypes>
 #include <cmath>
 #include <cstdint>
+#include <functional>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -101,6 +107,8 @@ PG_FUNCTION_INFO_V1(age_gds_kcore_stream);
 PG_FUNCTION_INFO_V1(age_gds_trianglecount_stream);
 PG_FUNCTION_INFO_V1(age_gds_localclusteringcoefficient_stream);
 PG_FUNCTION_INFO_V1(age_gds_modularity_stats);
+PG_FUNCTION_INFO_V1(age_gds_conductance_stats);
+PG_FUNCTION_INFO_V1(age_gds_cliquecounting_stats);
 
 /* ---------------------------------------------- louvain_stream ----------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
@@ -533,6 +541,149 @@ Datum age_gds_modularity_stats(PG_FUNCTION_ARGS)
     values[0] = Float8GetDatum(mod_val);
     srf_emit(s, values, nulls);
 
+    return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- conductance_stats -------- */
+// arg layout: 0=graph_name, 1=community_property, 2=relationship_weight_property,
+//             3=age_graph, 4=node_query, 5=edge_query
+//
+// NetworKit::Conductance::getQuality() (community/Conductance.hpp) requires
+// a literal 2-partition: cluster ids must be exactly 0 or 1 for every node
+// (it indexes fixed-size arrays vol[2]/vol[0..1] directly by subset id, with
+// no bounds check -- an id outside {0,1} is undefined behavior, not a
+// caught error). That contract is incompatible with
+// read_node_property_as_partition()'s ids (plan 02's helper), which
+// deliberately assigns *internal* dense subset ids offset above
+// graph.upperNodeIdBound() rather than passing raw property values through
+// as literal subset ids -- reusing it here would silently violate
+// Conductance's precondition. Instead this reuses
+// read_node_property_as_values() (also from partition_post.h) to read the
+// raw numeric property, validates every node's value is exactly 0.0 or 1.0
+// (erroring otherwise -- no silent coercion), and builds the
+// NetworKit::Partition directly from those literal 0/1 ids.
+Datum age_gds_conductance_stats(PG_FUNCTION_ARGS)
+{
+    const char *gname     = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *comm_prop  = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *wprop      = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *agraph     = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *nq         = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+    const char *eq         = PG_ARGISNULL(5) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(5));
+
+    if (!comm_prop)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("conductance_stats requires community_property")));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
+    const ProjectedGraph &pg = *gh.pg;
+
+    require_node_query(pg, "conductance_stats's community_property");
+
+    std::vector<double> values;
+    const double MISSING = std::numeric_limits<double>::quiet_NaN();
+    try {
+        values = read_node_property_as_values(
+            pg.graph, pg.id_map, pg.age_graph.c_str(), pg.node_query.c_str(),
+            comm_prop, MISSING);
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("community_property read failed for graph \"%s\": %s",
+                               pg.name.c_str(), ex.what())));
+    }
+
+    std::vector<NetworKit::index> ids(pg.graph.upperNodeIdBound(), NetworKit::none);
+    bool saw0 = false, saw1 = false;
+    pg.graph.forNodes([&](NetworKit::node u) {
+        double v = values[u];
+        if (v != 0.0 && v != 1.0)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("conductance_stats: community_property \"%s\" must be "
+                            "exactly 0 or 1 for every node (Conductance is only "
+                            "defined for 2-partitions); node %" PRId64 " has %s",
+                            comm_prop, (int64_t)pg.id_map.resolve(u),
+                            std::isnan(v) ? "no value" : "a different value")));
+        ids[u] = (NetworKit::index)v;
+        if (v == 0.0) saw0 = true; else saw1 = true;
+    });
+    if (!saw0 || !saw1)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("conductance_stats: community_property \"%s\" must assign "
+                        "at least one node to each of community 0 and community 1",
+                        comm_prop)));
+
+    NetworKit::Partition part(ids);
+    // Partition(vector) sets omega = max_elem(data), which is 0 (not 1)
+    // whenever any slot is still NetworKit::none -- e.g. graph.upperNodeIdBound()
+    // > graph.numberOfNodes() (removed/tombstoned node ids on an incremental
+    // or live projection). Conductance::getQuality() then indexes fixed-size
+    // 2-element arrays by upperBound() (a heap OOB write for anything other
+    // than literal 0/1), so omega must be pinned explicitly regardless of
+    // gaps in the node-id space.
+    part.setUpperBound(2);
+    NetworKit::Conductance cond;
+    double cond_val = cond.getQuality(part, pg.graph);
+
+    Oid types[1] = {FLOAT8OID};
+    SRFState s = srf_begin(fcinfo, 1, types);
+    Datum out_values[1]; bool out_nulls[1] = {false};
+    out_values[0] = Float8GetDatum(cond_val);
+    srf_emit(s, out_values, out_nulls);
+
+    return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- cliqueCounting_stats ----- */
+// arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query
+//
+// Backed by NetworKit::MaximalCliques(G, callback) (clique/MaximalCliques.hpp):
+// counts are accumulated, bucketed by clique size, as each maximal clique is
+// emitted by the callback -- no materialization of the full clique list.
+// Note: this counts *maximal* cliques (NetworKit has no "list every clique
+// of every size, maximal or not" primitive), bucketed by size; the total
+// clique count across all sizes is SUM(count) over the result rows.
+Datum age_gds_cliquecounting_stats(PG_FUNCTION_ARGS)
+{
+    GraphHandle gh = resolve_graph_args(fcinfo);
+    const ProjectedGraph &pg = *gh.pg;
+
+    // Cliques are an undirected-graph concept; unlike BiconnectedComponents
+    // (used by bridges_stream/articulationPoints_stream), MaximalCliques'
+    // constructor does not itself reject directed input -- it would just
+    // silently treat edge direction as irrelevant, producing a plausible
+    // but wrong clique count. Reject explicitly rather than paper over it.
+    if (pg.graph.isDirected())
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("cliqueCounting_stats requires an undirected graph "
+                               "(cliques are not defined for directed edges); "
+                               "graph \"%s\" is directed", pg.name.c_str())));
+
+    std::map<size_t, int64_t> counts_by_size;
+    std::function<void(const std::vector<NetworKit::node> &)> cb =
+        [&](const std::vector<NetworKit::node> &clique) {
+            counts_by_size[clique.size()]++;
+        };
+
+    try {
+        NetworKit::MaximalCliques mc(pg.graph, cb);
+        mc.run();
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("MaximalCliques failed: %s", ex.what())));
+    }
+
+    Oid types[2] = {INT4OID, INT8OID};
+    SRFState s = srf_begin(fcinfo, 2, types);
+
+    for (const auto &[size, count] : counts_by_size) {
+        Datum values[2]; bool nulls[2] = {false, false};
+        values[0] = Int32GetDatum((int32_t)size);
+        values[1] = Int64GetDatum(count);
+        srf_emit(s, values, nulls);
+    }
     return srf_end(s, fcinfo);
 }
 

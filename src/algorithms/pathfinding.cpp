@@ -7,7 +7,9 @@
 //   shortestPath.astar, minCostMaxFlow.
 //
 // See docs/implemented-plans/03-pathfinding-parity.md for the design
-// decisions behind every parameter added in this file.
+// decisions behind every parameter added in this file, and
+// docs/implemented-plans/06-new-graph-procedures.md for topologicalSort,
+// longestPath and bridges.
 //
 // Include order: NetworKit first, then PostgreSQL, then restore ERROR=21.
 
@@ -23,6 +25,8 @@
 #include <networkit/graph/RandomMaximumSpanningForest.hpp>
 #include <networkit/graph/DFS.hpp>
 #include <networkit/graph/BFS.hpp>
+#include <networkit/graph/TopologicalSort.hpp>
+#include <networkit/components/BiconnectedComponents.hpp>
 #include <networkit/flow/EdmondsKarp.hpp>
 #include <networkit/flow/SuccessiveShortestPath.hpp>
 #include <networkit/auxiliary/Random.hpp>
@@ -47,6 +51,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -221,6 +226,9 @@ PG_FUNCTION_INFO_V1(age_gds_allshortestpaths_stream);
 PG_FUNCTION_INFO_V1(age_gds_maxflow_stats);
 PG_FUNCTION_INFO_V1(age_gds_shortestpath_astar_stream);
 PG_FUNCTION_INFO_V1(age_gds_mincostmaxflow_stats);
+PG_FUNCTION_INFO_V1(age_gds_topologicalsort_stream);
+PG_FUNCTION_INFO_V1(age_gds_longestpath_stream);
+PG_FUNCTION_INFO_V1(age_gds_bridges_stream);
 
 /* ---------------------------------------------- bfs_stream --------------- */
 /* Args: 0=graph_name, 1=source_node, 2=age_graph, 3=node_query, 4=edge_query,
@@ -1123,6 +1131,173 @@ Datum age_gds_mincostmaxflow_stats(PG_FUNCTION_ARGS)
     values[0] = Float8GetDatum(total_cost);
     values[1] = Int64GetDatum(ms);
     srf_emit(s, values, nulls);
+    return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- topologicalSort_stream --- */
+// arg layout: 0=graph_name, 1=compute_max_distance_from_source,
+//             2=age_graph, 3=node_query, 4=edge_query
+//
+// Backed directly by NetworKit::TopologicalSort(G). Its constructor throws
+// if G is not directed, and run() throws "the input graph has cycles" if G
+// is not a DAG -- both are input-shape errors, surfaced as
+// ERRCODE_INVALID_PARAMETER_VALUE rather than silently producing a partial
+// or wrong order.
+//
+// max_distance (when requested) is a plain linear DP pass over the
+// already-computed topological order: dist[v] = max(dist[u]) + 1 over
+// predecessors u, computed by walking the order once and pushing each
+// node's distance forward to its successors. This is array reduction over
+// TopologicalSort's output, not a hand-rolled traversal.
+
+Datum age_gds_topologicalsort_stream(PG_FUNCTION_ARGS)
+{
+    const char *gname = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    bool want_dist     = PG_ARGISNULL(1) ? false : PG_GETARG_BOOL(1);
+    const char *agraph = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *nq      = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *eq      = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::unique_ptr<NetworKit::TopologicalSort> ts;
+    try {
+        ts = std::make_unique<NetworKit::TopologicalSort>(pg.graph);
+        ts->run();
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("topologicalSort_stream: %s (graph \"%s\" must be "
+                               "a directed acyclic graph)",
+                               ex.what(), pg.name.c_str())));
+    }
+
+    const std::vector<NetworKit::node> &topo = ts->getResult();
+
+    std::vector<int64_t> dist;
+    if (want_dist) {
+        dist.assign(pg.graph.upperNodeIdBound(), 0);
+        for (NetworKit::node u : topo) {
+            pg.graph.forNeighborsOf(u, [&](NetworKit::node v) {
+                if (dist[u] + 1 > dist[v])
+                    dist[v] = dist[u] + 1;
+            });
+        }
+    }
+
+    Oid types[3] = {INT8OID, INT4OID, INT4OID};
+    SRFState s = srf_begin(fcinfo, 3, types);
+
+    for (size_t i = 0; i < topo.size(); i++) {
+        NetworKit::node u = topo[i];
+        Datum values[3]; bool nulls[3] = {false, false, !want_dist};
+        values[0] = Int64GetDatum(pg.id_map.resolve(u));
+        values[1] = Int32GetDatum((int32_t)i);
+        values[2] = want_dist ? Int32GetDatum((int32_t)dist[u]) : (Datum)0;
+        srf_emit(s, values, nulls);
+    }
+    return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- longestPath_stream ------- */
+// arg layout: 0=graph_name, 1=relationship_weight_property,
+//             2=age_graph, 3=node_query, 4=edge_query
+//
+// Weighted longest-path-in-a-DAG: same TopologicalSort + DP pattern as
+// topologicalSort_stream's max_distance column, but weighted:
+// dist[v] = max over predecessors u of dist[u] + weight(u,v). Nodes with no
+// predecessors get dist 0 (they anchor the longest paths passing through
+// them). Errors out if the graph is not a DAG, same as above.
+
+Datum age_gds_longestpath_stream(PG_FUNCTION_ARGS)
+{
+    const char *gname = PG_ARGISNULL(0) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(0));
+    const char *wprop  = PG_ARGISNULL(1) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(1));
+    const char *agraph = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    const char *nq      = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
+    const char *eq      = PG_ARGISNULL(4) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(4));
+
+    GraphHandle gh = get_or_load_graph(gname, agraph, nq, eq);
+    apply_weight_override(gh, wprop);
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::unique_ptr<NetworKit::TopologicalSort> ts;
+    try {
+        ts = std::make_unique<NetworKit::TopologicalSort>(pg.graph);
+        ts->run();
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("longestPath_stream: %s (graph \"%s\" must be "
+                               "a directed acyclic graph)",
+                               ex.what(), pg.name.c_str())));
+    }
+
+    const std::vector<NetworKit::node> &topo = ts->getResult();
+
+    std::vector<double> dist(pg.graph.upperNodeIdBound(), 0.0);
+    for (NetworKit::node u : topo) {
+        pg.graph.forNeighborsOf(u, [&](NetworKit::node v, NetworKit::edgeweight w) {
+            double cand = dist[u] + w;
+            if (cand > dist[v])
+                dist[v] = cand;
+        });
+    }
+
+    Oid types[2] = {INT8OID, FLOAT8OID};
+    SRFState s = srf_begin(fcinfo, 2, types);
+
+    for (NetworKit::node u : topo) {
+        Datum values[2]; bool nulls[2] = {false, false};
+        values[0] = Int64GetDatum(pg.id_map.resolve(u));
+        values[1] = Float8GetDatum(dist[u]);
+        srf_emit(s, values, nulls);
+    }
+    return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- bridges_stream ----------- */
+// No dedicated NetworKit `Bridges` class. Derived from
+// NetworKit::BiconnectedComponents(G) (already used for
+// articulationPoints_stream in centrality.cpp): an edge is a bridge iff it
+// is the sole edge of its biconnected component, i.e. the component's node
+// set has exactly 2 members. One-pass filter over BiconnectedComponents's
+// output -- no new traversal algorithm.
+//
+// Caveat: "component has exactly 2 nodes" and "component has exactly 1
+// edge" only coincide for simple graphs. age_loader.cpp's addEdge() does
+// not deduplicate parallel AGE relationships between the same node pair
+// (NetworKit::Graph allows multi-edges), so two parallel edges between u
+// and v would form a 2-node biconnected component that is *not* actually
+// a bridge (removing either parallel edge leaves the graph connected).
+// This is a documented, deliberate approximation (see docs/api.md's
+// bridges_stream entry), not a silent gap: it is exact for the common
+// case (no parallel relationships between the same node pair) and only
+// diverges on projections with duplicate relationships.
+
+Datum age_gds_bridges_stream(PG_FUNCTION_ARGS)
+{
+    GraphHandle gh = resolve_graph_args(fcinfo, 1);
+    const ProjectedGraph &pg = *gh.pg;
+
+    NetworKit::BiconnectedComponents bcc(pg.graph);
+    try { bcc.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("BiconnectedComponents failed: %s", ex.what())));
+    }
+
+    Oid types[2] = {INT8OID, INT8OID};
+    SRFState s = srf_begin(fcinfo, 2, types);
+
+    for (const auto &comp : bcc.getComponents()) {
+        if (comp.size() != 2)
+            continue;
+        NetworKit::node u = comp[0], v = comp[1];
+        Datum values[2]; bool nulls[2] = {false, false};
+        values[0] = Int64GetDatum(pg.id_map.resolve(u));
+        values[1] = Int64GetDatum(pg.id_map.resolve(v));
+        srf_emit(s, values, nulls);
+    }
     return srf_end(s, fcinfo);
 }
 

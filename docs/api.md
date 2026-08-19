@@ -1019,6 +1019,80 @@ See also: [Plan: Community Detection Algorithm Parity Fixes](implemented-plans/0
 
 ---
 
+### `age_gds.conductance_stats`
+
+```sql
+age_gds.conductance_stats(
+    graph_name                    text DEFAULT NULL,
+    community_property            text DEFAULT NULL,
+    relationship_weight_property  text DEFAULT NULL,
+    age_graph                     text DEFAULT NULL,
+    node_query                    text DEFAULT NULL,
+    edge_query                    text DEFAULT NULL
+) RETURNS TABLE(conductance float8)
+```
+
+Returns the conductance of a 2-partition: cut size over the volume of the
+smaller-volume side. `community_property` is required and must assign every
+node a value of exactly `0` or `1` (read via the projection's stored
+`node_query` -- see "Node-property read" above); any other value, or a
+missing value on any node, raises an error rather than being silently
+coerced. `relationship_weight_property`: see "Relationship weight override"
+above. Returns one row.
+
+**Why not `read_node_property_as_partition`:** unlike other community
+functions in this file, this does *not* reuse plan 02's
+`read_node_property_as_partition()` helper. `NetworKit::Conductance::getQuality()`
+requires the partition's cluster ids to be the literal values `0`/`1` --
+internally it indexes fixed-size two-element arrays directly by cluster id,
+with no bounds check, so a mismatched id would be undefined behavior, not a
+caught error. `read_node_property_as_partition()` deliberately assigns
+*internal* dense subset ids offset above the graph's node-id range (so
+unrelated property values never collide with default singleton ids) --
+exactly the wrong shape for `Conductance`'s hard 2-partition contract. This
+function instead reuses `read_node_property_as_values()` (also from plan
+02's `partition_post.h`) to read the raw numeric property and builds the
+`NetworKit::Partition` directly from validated literal `0`/`1` ids.
+
+**NetworKit class:** `NetworKit::Conductance`
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
+
+---
+
+### `age_gds.cliqueCounting_stats`
+
+```sql
+age_gds.cliqueCounting_stats(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(clique_size int, count bigint)
+```
+
+Requires an undirected graph (cliques are not defined for directed edges;
+`NetworKit::MaximalCliques` does not itself reject directed input, so this
+is checked explicitly rather than silently treating edge direction as
+irrelevant). Counts maximal cliques, bucketed by clique size: one row per
+distinct size observed, with `count` being the number of maximal cliques
+of that size.
+The total maximal-clique count across all sizes is `SUM(count)` over the
+result rows. Note this counts *maximal* cliques only -- NetworKit has no
+primitive for enumerating every clique of every size (maximal or not), so
+this does not exactly reproduce Neo4j GDS's per-node `counts` semantics
+(which include non-maximal sub-cliques); it is the direct, thin-wrapper
+metric NetworKit's `MaximalCliques` callback API can produce without
+hand-rolled clique enumeration.
+
+**NetworKit class:** `NetworKit::MaximalCliques` (callback form, counted and
+bucketed by size as each clique is emitted -- no materialization of the
+full clique list)
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
+
+---
+
 ## 6. Path-finding algorithms
 
 ---
@@ -1440,6 +1514,98 @@ this function.
 ---
 
 See also: [Plan: Path-finding & Flow Algorithm Parity Fixes](implemented-plans/03-pathfinding-parity.md)
+
+---
+
+### `age_gds.topologicalSort_stream`
+
+```sql
+age_gds.topologicalSort_stream(
+    graph_name                        text    DEFAULT NULL,
+    compute_max_distance_from_source  boolean DEFAULT false,
+    age_graph                         text    DEFAULT NULL,
+    node_query                        text    DEFAULT NULL,
+    edge_query                        text    DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, "sortIndex" int, "maxDistance" int)
+```
+
+Returns one valid topological order of the graph, one row per node.
+`sortIndex` is dense, `0` to `n-1`, matching the returned order. Requires a
+directed acyclic graph -- raises an error (not a partial/wrong order) if
+the graph is undirected, or contains a cycle.
+
+`compute_max_distance_from_source`: when true, also populates `maxDistance`
+-- the length, in edges, of the longest path from any source node (a node
+with no incoming edges) to each node. Computed as a single linear DP pass
+over the already-computed topological order (`dist[v] = max(dist[u]) + 1`
+over predecessors `u`), not a new traversal algorithm. `maxDistance` is
+`NULL` when this flag is false.
+
+**NetworKit class:** `NetworKit::TopologicalSort`
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
+
+---
+
+### `age_gds.longestPath_stream`
+
+```sql
+age_gds.longestPath_stream(
+    graph_name                    text   DEFAULT NULL,
+    relationship_weight_property  text   DEFAULT NULL,
+    age_graph                     text   DEFAULT NULL,
+    node_query                    text   DEFAULT NULL,
+    edge_query                    text   DEFAULT NULL
+) RETURNS TABLE("nodeId" bigint, distance float8)
+```
+
+Weighted longest-path-in-a-DAG: for each node, the length of the longest
+weighted path from any source node (no incoming edges) to it. Same
+`TopologicalSort` + linear DP pass as `topologicalSort_stream`'s
+`maxDistance` column, but weighted: `dist[v] = max` over predecessors `u`
+of `dist[u] + weight(u,v)`. `relationship_weight_property`: see
+"Relationship weight override" above. Requires a directed acyclic graph --
+raises an error if the graph is undirected or contains a cycle.
+
+**NetworKit class:** `NetworKit::TopologicalSort`
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
+
+---
+
+### `age_gds.bridges_stream`
+
+```sql
+age_gds.bridges_stream(
+    graph_name text DEFAULT NULL,
+    age_graph  text DEFAULT NULL,
+    node_query text DEFAULT NULL,
+    edge_query text DEFAULT NULL
+) RETURNS TABLE(src bigint, dst bigint)
+```
+
+Returns every bridge edge (an edge whose removal disconnects the graph),
+one row per bridge, `src`/`dst` in arbitrary order (the underlying edge is
+undirected).
+
+**Substitution:** NetworKit has no dedicated `Bridges` class. Derived from
+`NetworKit::BiconnectedComponents` (the same class `articulationPoints_stream`
+uses): an edge is a bridge if and only if it is the sole edge of its
+biconnected component, i.e. that component's node set has exactly 2
+members. One-pass filter over `BiconnectedComponents`'s output.
+
+**Caveat (parallel edges):** "biconnected component has exactly 2 nodes"
+and "biconnected component has exactly 1 edge" only coincide for simple
+graphs. The AGE-to-NetworKit loader does not deduplicate parallel
+relationships between the same node pair, so a projection with two (or
+more) parallel edges between the same `u`/`v` would report that pair as a
+bridge even though removing just one of the parallel edges leaves the
+graph connected. Exact for the common case of no parallel relationships
+between the same node pair.
+
+**NetworKit class:** `NetworKit::BiconnectedComponents`
+
+See also: [Plan: New Graph-Theoretic Procedures](implemented-plans/06-new-graph-procedures.md)
 
 ---
 
