@@ -54,6 +54,7 @@ extern "C" {
 #include "catalog/session_cache.h"
 #include "util/srf_helper.h"
 #include "util/weight_override.h"
+#include "util/cypher_agtype.h"
 
 /* ============================================================ C functions */
 
@@ -165,6 +166,78 @@ Datum age_gds_node2vec_stream(PG_FUNCTION_ARGS)
     });
 
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- node2vec_stream (Cypher) - */
+/* config: embeddingDim, walkLength, walksPerNode, p, q,
+ * relationshipWeightProperty, windowSize, iterations */
+
+PG_FUNCTION_INFO_V1(age_gds_node2vec_stream_cypher);
+
+Datum age_gds_node2vec_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"embeddingDim", "walkLength", "walksPerNode", "p", "q",
+         "relationshipWeightProperty", "windowSize", "iterations"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    int dim = 128, wlen = 80, walks = 10, win_size = 10, iterations = 1;
+    double p = 1.0, q = 1.0;
+    cfg.get_int("embeddingDim", dim);
+    cfg.get_int("walkLength", wlen);
+    cfg.get_int("walksPerNode", walks);
+    cfg.get_double("p", p);
+    cfg.get_double("q", q);
+    cfg.get_int("windowSize", win_size);
+    cfg.get_int("iterations", iterations);
+    if (dim <= 0) dim = 128;
+    if (wlen <= 0) wlen = 80;
+    if (walks <= 0) walks = 10;
+    if (win_size <= 0) win_size = 10;
+    if (iterations <= 0) iterations = 1;
+
+    if (pg.graph.numberOfNodes() != pg.graph.upperNodeIdBound())
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("node2vec_stream requires contiguous node ids")));
+
+    bool has_isolated = false;
+    pg.graph.forNodes([&](NetworKit::node u) {
+        if (pg.graph.isIsolated(u)) has_isolated = true;
+    });
+    if (has_isolated)
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("node2vec_stream does not support graphs with isolated nodes")));
+
+    NetworKit::Embedding::BiasedRandomWalk::AllWalks walks_data;
+    NetworKit::Embedding::Embeddings features;
+    try {
+        NetworKit::Embedding::BiasedRandomWalk brw(&pg.graph);
+        brw.preprocessTransitionProbs(p, q);
+        walks_data = brw.doWalks((NetworKit::count)wlen, (NetworKit::count)walks);
+        features = NetworKit::Embedding::learnEmbeddings(
+            walks_data, pg.graph.numberOfNodes(), (NetworKit::count)dim,
+            (NetworKit::count)win_size, (NetworKit::count)iterations);
+    }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("Node2Vec failed: %s", ex.what())));
+    }
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        if (u >= (NetworKit::count)features.size()) return;
+        const auto &vec = features[u];
+        std::vector<double> embedding(vec.begin(), vec.end());
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("embedding"); b.add_double_array(embedding);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 } /* extern "C" */

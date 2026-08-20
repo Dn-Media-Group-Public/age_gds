@@ -57,6 +57,12 @@ std::string get_agtype_arg_string(FunctionCallInfo fcinfo, int argno, const char
 // True if the agtype argument is SQL NULL or JSON null.
 bool agtype_arg_is_null(FunctionCallInfo fcinfo, int argno);
 
+// Build a bare scalar agtype (not a map/array) from a double. For the
+// single-pair link-prediction functions, which are already scalar
+// (RETURNS float8 in SQL) and need no array/map packing for their Cypher
+// overload -- see plan phase 5.
+Datum double_to_agtype_scalar(double v);
+
 // --- Result building: JSON array-of-maps (*_stream) or single map
 // (*_stats/*_write), converted to an agtype Datum. ---
 class CypherResultBuilder {

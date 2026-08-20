@@ -66,6 +66,13 @@ static char *decode_json_string_literal(char *repr, const char *ctx)
     return result;
 }
 
+Datum double_to_agtype_scalar(double v)
+{
+    Datum num = DirectFunctionCall1(float8out, Float8GetDatum(v));
+    char *repr = DatumGetCString(num);
+    return agtype_from_cstring(repr);
+}
+
 std::string get_agtype_arg_string(FunctionCallInfo fcinfo, int argno, const char *argname)
 {
     if (PG_ARGISNULL(argno))

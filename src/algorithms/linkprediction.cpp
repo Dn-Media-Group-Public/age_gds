@@ -44,6 +44,7 @@ extern "C" {
 
 #include "catalog/session_cache.h"
 #include "util/srf_helper.h"
+#include "util/cypher_agtype.h"
 
 /* ============================================================ helpers === */
 
@@ -80,6 +81,43 @@ static Datum emit_lp_results(
     }
 
     return srf_end(s, fcinfo);
+}
+
+/* Shared core for the four *_stream Cypher wrappers: run the predictor's
+ * runAll() and return the raw predictions (no SPI, same computation the SQL
+ * SRF wrappers use via emit_lp_results()). */
+template <class Predictor>
+static std::vector<NetworKit::LinkPredictor::prediction> run_linkpred_all(
+    const ProjectedGraph &pg, const char *funcname)
+{
+    Predictor pred(pg.graph);
+    std::vector<NetworKit::LinkPredictor::prediction> results;
+    try { results = pred.runAll(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("%s failed: %s", funcname, ex.what())));
+    }
+    return results;
+}
+
+template <class Predictor>
+static Datum run_linkpred_stream_cypher(FunctionCallInfo fcinfo, const char *funcname)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {});
+    const ProjectedGraph &pg = *gh.pg;
+
+    auto results = run_linkpred_all<Predictor>(pg, funcname);
+
+    CypherResultBuilder b(true);
+    for (auto &pred : results) {
+        b.begin_row();
+        b.key("node1"); b.add_int64(pg.id_map.resolve(pred.first.first));
+        b.key("node2"); b.add_int64(pg.id_map.resolve(pred.first.second));
+        b.key("score"); b.add_double(pred.second);
+        b.end_row();
+    }
+    return b.finish();
 }
 
 /* ---------------------------------------- single-pair scalar functions --- */
@@ -203,6 +241,68 @@ static Datum run_linkpred_single(FunctionCallInfo fcinfo, const char *funcname)
     PG_RETURN_FLOAT8(score);
 }
 
+/* Shared core for the four single-pair Cypher scalar overloads:
+ * (node1 agtype, node2 agtype, graphName agtype, config agtype), config =
+ * {relationshipQuery, direction}. node1/node2 arrive as agtype integers --
+ * read via agtype_out (JSON number text), not get_agtype_arg_string (which
+ * expects a quoted JSON string). */
+template <class Predictor>
+static Datum run_linkpred_single_cypher(FunctionCallInfo fcinfo, const char *funcname)
+{
+    if (agtype_arg_is_null(fcinfo, 0) || agtype_arg_is_null(fcinfo, 1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s: node1 and node2 are required", funcname)));
+
+    char *n1_repr = DatumGetCString(DirectFunctionCall1(agtype_out, PG_GETARG_DATUM(0)));
+    char *n2_repr = DatumGetCString(DirectFunctionCall1(agtype_out, PG_GETARG_DATUM(1)));
+    int64_t n1 = strtoll(n1_repr, nullptr, 10);
+    int64_t n2 = strtoll(n2_repr, nullptr, 10);
+
+    if (agtype_arg_is_null(fcinfo, 2))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s: graphName is required", funcname)));
+    std::string gname = get_agtype_arg_string(fcinfo, 2, "graphName");
+
+    CypherConfig cfg = parse_cypher_config(fcinfo, 3);
+    cfg.validate_keys({"relationshipQuery", "direction"});
+    std::string rel_q;
+    bool has_rel_q = cfg.get_string("relationshipQuery", rel_q);
+    std::string dir_str = "BOTH";
+    cfg.get_string("direction", dir_str);
+
+    validate_direction_both_only(dir_str.c_str(), funcname);
+
+    GraphHandle gh = load_final_graph(gname.c_str(), has_rel_q ? rel_q.c_str() : nullptr, funcname);
+    const ProjectedGraph &pg = *gh.pg;
+
+    auto it1 = pg.id_map.graphid_to_nk.find(n1);
+    if (it1 == pg.id_map.graphid_to_nk.end())
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s: node1 %" PRId64 " not in graph", funcname, n1)));
+    auto it2 = pg.id_map.graphid_to_nk.find(n2);
+    if (it2 == pg.id_map.graphid_to_nk.end())
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s: node2 %" PRId64 " not in graph", funcname, n2)));
+
+    NetworKit::Graph undirected_storage;
+    const NetworKit::Graph *g = &pg.graph;
+    if (g->isDirected()) {
+        undirected_storage = NetworKit::GraphTools::toUndirected(*g);
+        g = &undirected_storage;
+    }
+
+    Predictor pred(*g);
+    double score;
+    try {
+        score = pred.run(it1->second, it2->second);
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("%s failed: %s", funcname, ex.what())));
+    }
+
+    return double_to_agtype_scalar(score);
+}
+
 /* ============================================================ C functions */
 
 extern "C" {
@@ -215,6 +315,14 @@ PG_FUNCTION_INFO_V1(age_gds_linkpred_adamicadar);
 PG_FUNCTION_INFO_V1(age_gds_linkpred_commonneighbors);
 PG_FUNCTION_INFO_V1(age_gds_linkpred_preferentialattachment);
 PG_FUNCTION_INFO_V1(age_gds_linkpred_resourceallocation);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_adamicadar_stream_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_commonneighbors_stream_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_preferentialattachment_stream_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_resourceallocation_stream_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_adamicadar_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_commonneighbors_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_preferentialattachment_cypher);
+PG_FUNCTION_INFO_V1(age_gds_linkpred_resourceallocation_cypher);
 
 /* ---------------------------------------- adamicAdar_stream -------------- */
 
@@ -308,6 +416,45 @@ Datum age_gds_linkpred_preferentialattachment(PG_FUNCTION_ARGS)
 Datum age_gds_linkpred_resourceallocation(PG_FUNCTION_ARGS)
 {
     return run_linkpred_single<NetworKit::ResourceAllocationIndex>(fcinfo, "linkprediction_resourceAllocation");
+}
+
+/* ---------------------------------------- Cypher-callable overloads ------ */
+/* *_stream: config = {} (graph selection only) -- array of {node1, node2,
+ * score}. Single-pair: (node1, node2, graphName, config); config =
+ * {relationshipQuery, direction} -- bare scalar agtype, no array/map. */
+
+Datum age_gds_linkpred_adamicadar_stream_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_stream_cypher<NetworKit::AdamicAdarIndex>(fcinfo, "linkprediction_adamicAdar_stream");
+}
+Datum age_gds_linkpred_commonneighbors_stream_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_stream_cypher<NetworKit::CommonNeighborsIndex>(fcinfo, "linkprediction_commonNeighbors_stream");
+}
+Datum age_gds_linkpred_preferentialattachment_stream_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_stream_cypher<NetworKit::PreferentialAttachmentIndex>(fcinfo, "linkprediction_preferentialAttachment_stream");
+}
+Datum age_gds_linkpred_resourceallocation_stream_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_stream_cypher<NetworKit::ResourceAllocationIndex>(fcinfo, "linkprediction_resourceAllocation_stream");
+}
+
+Datum age_gds_linkpred_adamicadar_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_single_cypher<NetworKit::AdamicAdarIndex>(fcinfo, "linkprediction_adamicAdar");
+}
+Datum age_gds_linkpred_commonneighbors_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_single_cypher<NetworKit::CommonNeighborsIndex>(fcinfo, "linkprediction_commonNeighbors");
+}
+Datum age_gds_linkpred_preferentialattachment_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_single_cypher<NetworKit::PreferentialAttachmentIndex>(fcinfo, "linkprediction_preferentialAttachment");
+}
+Datum age_gds_linkpred_resourceallocation_cypher(PG_FUNCTION_ARGS)
+{
+    return run_linkpred_single_cypher<NetworKit::ResourceAllocationIndex>(fcinfo, "linkprediction_resourceAllocation");
 }
 
 } /* extern "C" */

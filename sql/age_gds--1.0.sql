@@ -1043,6 +1043,16 @@ CREATE FUNCTION age_gds.nodeSimilarity_stream(
     AS 'age_gds', 'age_gds_nodesimilarity_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {similarityCutoff, degreeCutoff, topK,
+-- topN, relationshipWeightProperty, upperDegreeCutoff, bottomK, bottomN,
+-- sourceNodeFilter, targetNodeFilter, useComponents, similarityMetric}.
+CREATE FUNCTION age_gds.nodeSimilarity_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_nodesimilarity_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.knn_stream(
     graph_name         text   DEFAULT NULL,
     top_k              int    DEFAULT 10,
@@ -1052,6 +1062,14 @@ CREATE FUNCTION age_gds.knn_stream(
     similarity_cutoff  float8 DEFAULT 0
 ) RETURNS TABLE("sourceNodeId" bigint, "targetNodeId" bigint, similarity float8, rank int)
     AS 'age_gds', 'age_gds_knn_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {topK, similarityCutoff}.
+CREATE FUNCTION age_gds.knn_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_knn_stream_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------
@@ -1072,6 +1090,14 @@ CREATE FUNCTION age_gds.linkprediction_adamicAdar_stream(
     AS 'age_gds', 'age_gds_linkpred_adamicadar_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: no per-algorithm config keys.
+CREATE FUNCTION age_gds.linkprediction_adamicAdar_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_adamicadar_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.linkprediction_commonNeighbors_stream(
     graph_name text DEFAULT NULL,
     age_graph  text DEFAULT NULL,
@@ -1079,6 +1105,13 @@ CREATE FUNCTION age_gds.linkprediction_commonNeighbors_stream(
     edge_query text DEFAULT NULL
 ) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
     AS 'age_gds', 'age_gds_linkpred_commonneighbors_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_commonNeighbors_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_commonneighbors_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.linkprediction_preferentialAttachment_stream(
@@ -1090,6 +1123,13 @@ CREATE FUNCTION age_gds.linkprediction_preferentialAttachment_stream(
     AS 'age_gds', 'age_gds_linkpred_preferentialattachment_stream'
     LANGUAGE C;
 
+CREATE FUNCTION age_gds.linkprediction_preferentialAttachment_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_preferentialattachment_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.linkprediction_resourceAllocation_stream(
     graph_name text DEFAULT NULL,
     age_graph  text DEFAULT NULL,
@@ -1097,6 +1137,13 @@ CREATE FUNCTION age_gds.linkprediction_resourceAllocation_stream(
     edge_query text DEFAULT NULL
 ) RETURNS TABLE(node1 bigint, node2 bigint, score float8)
     AS 'age_gds', 'age_gds_linkpred_resourceallocation_stream'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_resourceAllocation_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_resourceallocation_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.linkprediction_adamicAdar(
@@ -1109,6 +1156,18 @@ CREATE FUNCTION age_gds.linkprediction_adamicAdar(
     AS 'age_gds', 'age_gds_linkpred_adamicadar'
     LANGUAGE C;
 
+-- Cypher-callable overload: (node1, node2, graphName, config); config =
+-- {relationshipQuery, direction}. Already scalar -- bare agtype number,
+-- no array/map packing.
+CREATE FUNCTION age_gds.linkprediction_adamicAdar(
+    node1       ag_catalog.agtype,
+    node2       ag_catalog.agtype,
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_adamicadar_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.linkprediction_commonNeighbors(
     node1               bigint,
     node2               bigint,
@@ -1117,6 +1176,15 @@ CREATE FUNCTION age_gds.linkprediction_commonNeighbors(
     direction           text DEFAULT 'BOTH'
 ) RETURNS float8
     AS 'age_gds', 'age_gds_linkpred_commonneighbors'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_commonNeighbors(
+    node1       ag_catalog.agtype,
+    node2       ag_catalog.agtype,
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_commonneighbors_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.linkprediction_preferentialAttachment(
@@ -1129,6 +1197,15 @@ CREATE FUNCTION age_gds.linkprediction_preferentialAttachment(
     AS 'age_gds', 'age_gds_linkpred_preferentialattachment'
     LANGUAGE C;
 
+CREATE FUNCTION age_gds.linkprediction_preferentialAttachment(
+    node1       ag_catalog.agtype,
+    node2       ag_catalog.agtype,
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_preferentialattachment_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.linkprediction_resourceAllocation(
     node1               bigint,
     node2               bigint,
@@ -1137,6 +1214,15 @@ CREATE FUNCTION age_gds.linkprediction_resourceAllocation(
     direction           text DEFAULT 'BOTH'
 ) RETURNS float8
     AS 'age_gds', 'age_gds_linkpred_resourceallocation'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.linkprediction_resourceAllocation(
+    node1       ag_catalog.agtype,
+    node2       ag_catalog.agtype,
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_linkpred_resourceallocation_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------
@@ -1159,6 +1245,15 @@ CREATE FUNCTION age_gds.node2vec_stream(
     iterations                    int     DEFAULT 1
 ) RETURNS TABLE("nodeId" bigint, embedding float8[])
     AS 'age_gds', 'age_gds_node2vec_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {embeddingDim, walkLength,
+-- walksPerNode, p, q, relationshipWeightProperty, windowSize, iterations}.
+CREATE FUNCTION age_gds.node2vec_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_node2vec_stream_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

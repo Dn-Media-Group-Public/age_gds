@@ -43,6 +43,7 @@ extern "C" {
 #include "catalog/session_cache.h"
 #include "util/srf_helper.h"
 #include "util/weight_override.h"
+#include "util/cypher_agtype.h"
 
 /* ============================================================ helpers === */
 
@@ -198,76 +199,45 @@ extern "C" {
 PG_FUNCTION_INFO_V1(age_gds_nodesimilarity_stream);
 PG_FUNCTION_INFO_V1(age_gds_knn_stream);
 
-/* ------------------------------------------ nodeSimilarity_stream -------- */
-// Args: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
-//       4=similarity_cutoff, 5=degree_cutoff, 6=top_k, 7=top_n,
-//       8=relationship_weight_property, 9=upper_degree_cutoff,
-//       10=bottom_k, 11=bottom_n, 12=source_node_filter,
-//       13=target_node_filter, 14=use_components, 15=similarity_metric
+/* Shared core for nodeSimilarity_stream's two wrappers: given already-
+ * resolved config, computes and returns the top/bottom-K rows. No SPI
+ * round-trip; both entry points call this directly. */
+struct NodeSimilarityParams {
+    double similarity_cutoff = 1e-42;
+    int64_t degree_cutoff = 1;
+    int top_k = 10, top_n = 0;
+    int64_t upper_degree_cutoff = INT64_MAX;
+    int bottom_k = 10, bottom_n = 0;
+    bool has_source_filter = false, has_target_filter = false;
+    std::vector<int64_t> source_gids, target_gids;
+    bool use_components = false;
+    SimMetric metric = SimMetric::JACCARD;
+    bool weighted = false;
+};
 
-Datum age_gds_nodesimilarity_stream(PG_FUNCTION_ARGS)
+static void run_node_similarity(
+    const ProjectedGraph &pg, const NodeSimilarityParams &p,
+    std::vector<SimRow> &top_rows_out, std::vector<SimRow> &bottom_rows_out)
 {
-    double similarity_cutoff = PG_ARGISNULL(4) ? 1e-42 : PG_GETARG_FLOAT8(4);
-    int64_t degree_cutoff    = PG_ARGISNULL(5) ? 1     : (int64_t)PG_GETARG_INT32(5);
-    int top_k                = PG_ARGISNULL(6) ? 10    : PG_GETARG_INT32(6);
-    int top_n                = PG_ARGISNULL(7) ? 0     : PG_GETARG_INT32(7);
-    const char *wprop        = PG_ARGISNULL(8) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(8));
-    int64_t upper_degree_cutoff = PG_ARGISNULL(9) ? INT64_MAX : PG_GETARG_INT64(9);
-    int bottom_k              = PG_ARGISNULL(10) ? 10 : PG_GETARG_INT32(10);
-    int bottom_n              = PG_ARGISNULL(11) ? 0  : PG_GETARG_INT32(11);
-    bool has_source_filter    = !PG_ARGISNULL(12);
-    std::vector<int64_t> source_gids = has_source_filter ? parse_bigint_array(PG_GETARG_DATUM(12))
-                                                          : std::vector<int64_t>();
-    bool has_target_filter    = !PG_ARGISNULL(13);
-    std::vector<int64_t> target_gids = has_target_filter ? parse_bigint_array(PG_GETARG_DATUM(13))
-                                                          : std::vector<int64_t>();
-    bool use_components       = PG_ARGISNULL(14) ? false : PG_GETARG_BOOL(14);
-    const char *metric_str    = PG_ARGISNULL(15) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(15));
-
-    if (top_k < 0) top_k = 0;
-    if (bottom_k < 0) bottom_k = 0;
-
-    SimMetric metric = parse_sim_metric(metric_str);
-    bool weighted = (wprop != nullptr);
-    if (weighted && metric != SimMetric::JACCARD)
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("nodeSimilarity_stream: relationship_weight_property is only "
-                        "supported with similarity_metric = 'JACCARD'")));
-
-    /* age_graph_idx = 1 */
-    GraphHandle gh = resolve_sim_graph(fcinfo, 1);
-    apply_weight_override(gh, wprop);
-    const ProjectedGraph &pg = *gh.pg;
-
-    if (weighted && !pg.graph.isWeighted())
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("nodeSimilarity_stream: relationship_weight_property was given but "
-                        "the resulting graph is not weighted (Graph::isWeighted() == false)"),
-                 errdetail("For named graphs (graph_name), this means apply_weight_override "
-                           "did not produce a weighted graph. For anonymous graphs "
-                           "(age_graph/node_query/edge_query), relationship_weight_property is "
-                           "a no-op by design -- write the desired property into edge_query's "
-                           "\"weight\" column yourself and pass weighted := true; see "
-                           "docs/api.md's \"Relationship weight override\" section.")));
+    int top_k = std::max(p.top_k, 0);
+    int bottom_k = std::max(p.bottom_k, 0);
 
     NetworKit::Graph undirected_storage;
     const NetworKit::Graph &g = to_undirected_if_needed(pg.graph, undirected_storage);
 
     std::optional<NetworKit::ConnectedComponents> cc;
-    if (use_components) {
+    if (p.use_components) {
         cc.emplace(g);
         cc->run();
     }
 
     NetworKit::JaccardIndex ji(g);
     auto compute_score = [&](NetworKit::node a, NetworKit::node b) -> double {
-        if (metric == SimMetric::JACCARD) {
-            if (weighted) return score_weighted_jaccard(g, a, b);
+        if (p.metric == SimMetric::JACCARD) {
+            if (p.weighted) return score_weighted_jaccard(g, a, b);
             return ji.run(a, b);
         }
-        return score_unweighted(g, a, b, metric);
+        return score_unweighted(g, a, b, p.metric);
     };
 
     NetworKit::count bound = g.upperNodeIdBound();
@@ -287,52 +257,51 @@ Datum age_gds_nodesimilarity_stream(PG_FUNCTION_ARGS)
         else if (score < h.top().score) { h.pop(); h.push({score, other}); }
     };
     auto components_ok = [&](NetworKit::node a, NetworKit::node b) {
-        return !use_components || cc->componentOfNode(a) == cc->componentOfNode(b);
+        return !p.use_components || cc->componentOfNode(a) == cc->componentOfNode(b);
     };
 
-    if (!has_source_filter && !has_target_filter) {
+    if (!p.has_source_filter && !p.has_target_filter) {
         g.forNodes([&](NetworKit::node a) {
-            if (!degree_ok(g, a, degree_cutoff, upper_degree_cutoff)) return;
+            if (!degree_ok(g, a, p.degree_cutoff, p.upper_degree_cutoff)) return;
             g.forNodes([&](NetworKit::node b) {
                 if (b <= a) return;
-                if (!degree_ok(g, b, degree_cutoff, upper_degree_cutoff)) return;
+                if (!degree_ok(g, b, p.degree_cutoff, p.upper_degree_cutoff)) return;
                 if (!components_ok(a, b)) return;
                 double score = compute_score(a, b);
-                if (score < similarity_cutoff) return;
+                if (score < p.similarity_cutoff) return;
                 push_top(a, b, score);    push_top(b, a, score);
                 push_bottom(a, b, score); push_bottom(b, a, score);
             });
         });
     } else {
         std::vector<NetworKit::node> src_list, tgt_list;
-        if (has_source_filter)
-            src_list = resolve_node_array(source_gids, pg, "source_node_filter");
+        if (p.has_source_filter)
+            src_list = resolve_node_array(p.source_gids, pg, "source_node_filter");
         else
             g.forNodes([&](NetworKit::node n) {
-                if (degree_ok(g, n, degree_cutoff, upper_degree_cutoff)) src_list.push_back(n);
+                if (degree_ok(g, n, p.degree_cutoff, p.upper_degree_cutoff)) src_list.push_back(n);
             });
-        if (has_target_filter)
-            tgt_list = resolve_node_array(target_gids, pg, "target_node_filter");
+        if (p.has_target_filter)
+            tgt_list = resolve_node_array(p.target_gids, pg, "target_node_filter");
         else
             g.forNodes([&](NetworKit::node n) {
-                if (degree_ok(g, n, degree_cutoff, upper_degree_cutoff)) tgt_list.push_back(n);
+                if (degree_ok(g, n, p.degree_cutoff, p.upper_degree_cutoff)) tgt_list.push_back(n);
             });
 
         for (NetworKit::node a : src_list) {
-            if (!degree_ok(g, a, degree_cutoff, upper_degree_cutoff)) continue;
+            if (!degree_ok(g, a, p.degree_cutoff, p.upper_degree_cutoff)) continue;
             for (NetworKit::node b : tgt_list) {
                 if (a == b) continue;
-                if (!degree_ok(g, b, degree_cutoff, upper_degree_cutoff)) continue;
+                if (!degree_ok(g, b, p.degree_cutoff, p.upper_degree_cutoff)) continue;
                 if (!components_ok(a, b)) continue;
                 double score = compute_score(a, b);
-                if (score < similarity_cutoff) continue;
+                if (score < p.similarity_cutoff) continue;
                 push_top(a, b, score);
                 push_bottom(a, b, score);
             }
         }
     }
 
-    std::vector<SimRow> top_rows, bottom_rows;
     g.forNodes([&](NetworKit::node u) {
         std::unordered_set<NetworKit::node> top_partners;
         if (top_k > 0) {
@@ -340,32 +309,83 @@ Datum age_gds_nodesimilarity_stream(PG_FUNCTION_ARGS)
             while (!h.empty()) {
                 SimEntry e = h.top(); h.pop();
                 top_partners.insert(e.other);
-                top_rows.push_back({pg.id_map.resolve(u), pg.id_map.resolve(e.other), e.score});
+                top_rows_out.push_back({pg.id_map.resolve(u), pg.id_map.resolve(e.other), e.score});
             }
         }
         if (bottom_k > 0) {
             BottomHeap &h = bottom_heaps[u];
             while (!h.empty()) {
                 SimEntry e = h.top(); h.pop();
-                /* Dedup against the top-K set for this node: with few
-                 * candidates, the same partner can land in both bounded
-                 * heaps. */
                 if (top_partners.count(e.other)) continue;
-                bottom_rows.push_back({pg.id_map.resolve(u), pg.id_map.resolve(e.other), e.score});
+                bottom_rows_out.push_back({pg.id_map.resolve(u), pg.id_map.resolve(e.other), e.score});
             }
         }
     });
 
-    if (top_n > 0 && (int)top_rows.size() > top_n) {
-        std::sort(top_rows.begin(), top_rows.end(),
+    if (p.top_n > 0 && (int)top_rows_out.size() > p.top_n) {
+        std::sort(top_rows_out.begin(), top_rows_out.end(),
                   [](const SimRow &a, const SimRow &b) { return a.score > b.score; });
-        top_rows.resize(top_n);
+        top_rows_out.resize(p.top_n);
     }
-    if (bottom_n > 0 && (int)bottom_rows.size() > bottom_n) {
-        std::sort(bottom_rows.begin(), bottom_rows.end(),
+    if (p.bottom_n > 0 && (int)bottom_rows_out.size() > p.bottom_n) {
+        std::sort(bottom_rows_out.begin(), bottom_rows_out.end(),
                   [](const SimRow &a, const SimRow &b) { return a.score < b.score; });
-        bottom_rows.resize(bottom_n);
+        bottom_rows_out.resize(p.bottom_n);
     }
+}
+
+/* ------------------------------------------ nodeSimilarity_stream -------- */
+// Args: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
+//       4=similarity_cutoff, 5=degree_cutoff, 6=top_k, 7=top_n,
+//       8=relationship_weight_property, 9=upper_degree_cutoff,
+//       10=bottom_k, 11=bottom_n, 12=source_node_filter,
+//       13=target_node_filter, 14=use_components, 15=similarity_metric
+
+Datum age_gds_nodesimilarity_stream(PG_FUNCTION_ARGS)
+{
+    NodeSimilarityParams p;
+    p.similarity_cutoff = PG_ARGISNULL(4) ? 1e-42 : PG_GETARG_FLOAT8(4);
+    p.degree_cutoff      = PG_ARGISNULL(5) ? 1     : (int64_t)PG_GETARG_INT32(5);
+    p.top_k              = PG_ARGISNULL(6) ? 10    : PG_GETARG_INT32(6);
+    p.top_n              = PG_ARGISNULL(7) ? 0     : PG_GETARG_INT32(7);
+    const char *wprop    = PG_ARGISNULL(8) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(8));
+    p.upper_degree_cutoff = PG_ARGISNULL(9) ? INT64_MAX : PG_GETARG_INT64(9);
+    p.bottom_k            = PG_ARGISNULL(10) ? 10 : PG_GETARG_INT32(10);
+    p.bottom_n            = PG_ARGISNULL(11) ? 0  : PG_GETARG_INT32(11);
+    p.has_source_filter    = !PG_ARGISNULL(12);
+    if (p.has_source_filter) p.source_gids = parse_bigint_array(PG_GETARG_DATUM(12));
+    p.has_target_filter    = !PG_ARGISNULL(13);
+    if (p.has_target_filter) p.target_gids = parse_bigint_array(PG_GETARG_DATUM(13));
+    p.use_components       = PG_ARGISNULL(14) ? false : PG_GETARG_BOOL(14);
+    const char *metric_str    = PG_ARGISNULL(15) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(15));
+
+    p.metric = parse_sim_metric(metric_str);
+    p.weighted = (wprop != nullptr);
+    if (p.weighted && p.metric != SimMetric::JACCARD)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("nodeSimilarity_stream: relationship_weight_property is only "
+                        "supported with similarity_metric = 'JACCARD'")));
+
+    /* age_graph_idx = 1 */
+    GraphHandle gh = resolve_sim_graph(fcinfo, 1);
+    apply_weight_override(gh, wprop);
+    const ProjectedGraph &pg = *gh.pg;
+
+    if (p.weighted && !pg.graph.isWeighted())
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("nodeSimilarity_stream: relationship_weight_property was given but "
+                        "the resulting graph is not weighted (Graph::isWeighted() == false)"),
+                 errdetail("For named graphs (graph_name), this means apply_weight_override "
+                           "did not produce a weighted graph. For anonymous graphs "
+                           "(age_graph/node_query/edge_query), relationship_weight_property is "
+                           "a no-op by design -- write the desired property into edge_query's "
+                           "\"weight\" column yourself and pass weighted := true; see "
+                           "docs/api.md's \"Relationship weight override\" section.")));
+
+    std::vector<SimRow> top_rows, bottom_rows;
+    run_node_similarity(pg, p, top_rows, bottom_rows);
 
     Oid types[3] = {INT8OID, INT8OID, FLOAT8OID};
     SRFState s   = srf_begin(fcinfo, 3, types);
@@ -385,6 +405,72 @@ Datum age_gds_nodesimilarity_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ------------------------------------ nodeSimilarity_stream (Cypher) ----- */
+/* config: similarityCutoff, degreeCutoff, topK, topN,
+ * relationshipWeightProperty, upperDegreeCutoff, bottomK, bottomN,
+ * sourceNodeFilter, targetNodeFilter, useComponents, similarityMetric */
+
+PG_FUNCTION_INFO_V1(age_gds_nodesimilarity_stream_cypher);
+
+Datum age_gds_nodesimilarity_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"similarityCutoff", "degreeCutoff", "topK", "topN",
+         "relationshipWeightProperty", "upperDegreeCutoff", "bottomK", "bottomN",
+         "sourceNodeFilter", "targetNodeFilter", "useComponents", "similarityMetric"});
+
+    NodeSimilarityParams p;
+    cfg.get_double("similarityCutoff", p.similarity_cutoff);
+    cfg.get_int64("degreeCutoff", p.degree_cutoff);
+    cfg.get_int("topK", p.top_k);
+    cfg.get_int("topN", p.top_n);
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    cfg.get_int64("upperDegreeCutoff", p.upper_degree_cutoff);
+    cfg.get_int("bottomK", p.bottom_k);
+    cfg.get_int("bottomN", p.bottom_n);
+    p.has_source_filter = cfg.get_int64_array("sourceNodeFilter", p.source_gids);
+    p.has_target_filter = cfg.get_int64_array("targetNodeFilter", p.target_gids);
+    cfg.get_bool("useComponents", p.use_components);
+    std::string metric_str;
+    cfg.get_string("similarityMetric", metric_str);
+    p.metric = parse_sim_metric(metric_str.empty() ? nullptr : metric_str.c_str());
+    p.weighted = has_wprop;
+
+    if (p.weighted && p.metric != SimMetric::JACCARD)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("nodeSimilarity_stream: relationshipWeightProperty is only "
+                        "supported with similarityMetric = 'JACCARD'")));
+
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    if (p.weighted && !pg.graph.isWeighted())
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("nodeSimilarity_stream: relationshipWeightProperty was given but "
+                        "the resulting graph is not weighted")));
+
+    std::vector<SimRow> top_rows, bottom_rows;
+    run_node_similarity(pg, p, top_rows, bottom_rows);
+
+    CypherResultBuilder b(true);
+    auto add_rows = [&](const std::vector<SimRow> &rows) {
+        for (const SimRow &r : rows) {
+            b.begin_row();
+            b.key("node1"); b.add_int64(r.n1);
+            b.key("node2"); b.add_int64(r.n2);
+            b.key("similarity"); b.add_double(r.score);
+            b.end_row();
+        }
+    };
+    add_rows(top_rows);
+    add_rows(bottom_rows);
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ------------------------------------------ knn_stream ------------------- */
 // Args: 0=graph_name, 1=top_k, 2=age_graph, 3=node_query, 4=edge_query,
 //       5=similarity_cutoff
@@ -395,17 +481,11 @@ Datum age_gds_nodesimilarity_stream(PG_FUNCTION_ARGS)
 // (no property-vector / approximate-NN class) this does not attempt to
 // close.
 
-Datum age_gds_knn_stream(PG_FUNCTION_ARGS)
+struct KnnRow { int64_t src, dst; double sim; int rank; };
+
+/* Shared core for knn_stream's two wrappers. */
+static std::vector<KnnRow> run_knn(const ProjectedGraph &pg, int top_k, double similarity_cutoff)
 {
-    int top_k = PG_ARGISNULL(1) ? 10 : PG_GETARG_INT32(1);
-    if (top_k <= 0) top_k = 10;
-    double similarity_cutoff = PG_ARGISNULL(5) ? 0.0 : PG_GETARG_FLOAT8(5);
-
-    /* age_graph_idx = 2 */
-    GraphHandle gh = resolve_sim_graph(fcinfo, 2);
-    const ProjectedGraph &pg = *gh.pg;
-
-    /* Build all pairs (u, v) where u < v */
     std::vector<std::pair<NetworKit::node, NetworKit::node>> all_pairs;
     pg.graph.forNodes([&](NetworKit::node u) {
         pg.graph.forNodes([&](NetworKit::node v) {
@@ -424,7 +504,6 @@ Datum age_gds_knn_stream(PG_FUNCTION_ARGS)
                  errmsg("knn: JaccardIndex failed: %s", ex.what())));
     }
 
-    /* Per-node neighbor lists: node -> [(score, other_node)] */
     NetworKit::count bound = pg.graph.upperNodeIdBound();
     std::vector<std::vector<std::pair<double, NetworKit::node>>> nbrs(bound);
 
@@ -437,33 +516,74 @@ Datum age_gds_knn_stream(PG_FUNCTION_ARGS)
         if (v < bound) nbrs[v].emplace_back(s, u);
     }
 
+    std::vector<KnnRow> out;
+    pg.graph.forNodes([&](NetworKit::node u) {
+        auto &nlist = nbrs[u];
+        std::sort(nlist.begin(), nlist.end(),
+                  [](const auto &a, const auto &b) { return a.first > b.first; });
+        int limit = std::min((int)nlist.size(), top_k);
+        int64_t src_id = pg.id_map.resolve(u);
+        for (int r = 0; r < limit; r++)
+            out.push_back({src_id, pg.id_map.resolve(nlist[r].second), nlist[r].first, r + 1});
+    });
+    return out;
+}
+
+Datum age_gds_knn_stream(PG_FUNCTION_ARGS)
+{
+    int top_k = PG_ARGISNULL(1) ? 10 : PG_GETARG_INT32(1);
+    if (top_k <= 0) top_k = 10;
+    double similarity_cutoff = PG_ARGISNULL(5) ? 0.0 : PG_GETARG_FLOAT8(5);
+
+    /* age_graph_idx = 2 */
+    GraphHandle gh = resolve_sim_graph(fcinfo, 2);
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::vector<KnnRow> rows = run_knn(pg, top_k, similarity_cutoff);
+
     /* Columns: sourceNodeId bigint, targetNodeId bigint, similarity float8, rank int */
     Oid types[4] = {INT8OID, INT8OID, FLOAT8OID, INT4OID};
     SRFState state = srf_begin(fcinfo, 4, types);
-
-    pg.graph.forNodes([&](NetworKit::node u) {
-        auto &nlist = nbrs[u];
-        /* Sort descending by score */
-        std::sort(nlist.begin(), nlist.end(),
-                  [](const auto &a, const auto &b) { return a.first > b.first; });
-
-        int limit = std::min((int)nlist.size(), top_k);
-        int64_t src_id = pg.id_map.resolve(u);
-
-        for (int r = 0; r < limit; r++) {
-            int64_t dst_id = pg.id_map.resolve(nlist[r].second);
-            double  sim    = nlist[r].first;
-
-            Datum values[4]; bool nulls[4] = {false, false, false, false};
-            values[0] = Int64GetDatum(src_id);
-            values[1] = Int64GetDatum(dst_id);
-            values[2] = Float8GetDatum(sim);
-            values[3] = Int32GetDatum(r + 1);
-            srf_emit(state, values, nulls);
-        }
-    });
-
+    for (const KnnRow &r : rows) {
+        Datum values[4]; bool nulls[4] = {false, false, false, false};
+        values[0] = Int64GetDatum(r.src);
+        values[1] = Int64GetDatum(r.dst);
+        values[2] = Float8GetDatum(r.sim);
+        values[3] = Int32GetDatum(r.rank);
+        srf_emit(state, values, nulls);
+    }
     return srf_end(state, fcinfo);
+}
+
+/* ------------------------------------------ knn_stream (Cypher) ---------- */
+/* config: topK, similarityCutoff */
+
+PG_FUNCTION_INFO_V1(age_gds_knn_stream_cypher);
+
+Datum age_gds_knn_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {"topK", "similarityCutoff"});
+    const ProjectedGraph &pg = *gh.pg;
+
+    int top_k = 10;
+    cfg.get_int("topK", top_k);
+    if (top_k <= 0) top_k = 10;
+    double similarity_cutoff = 0.0;
+    cfg.get_double("similarityCutoff", similarity_cutoff);
+
+    std::vector<KnnRow> rows = run_knn(pg, top_k, similarity_cutoff);
+
+    CypherResultBuilder b(true);
+    for (const KnnRow &r : rows) {
+        b.begin_row();
+        b.key("sourceNodeId"); b.add_int64(r.src);
+        b.key("targetNodeId"); b.add_int64(r.dst);
+        b.key("similarity"); b.add_double(r.sim);
+        b.key("rank"); b.add_int64(r.rank);
+        b.end_row();
+    }
+    PG_RETURN_DATUM(b.finish());
 }
 
 } /* extern "C" */
