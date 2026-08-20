@@ -392,6 +392,15 @@ CREATE FUNCTION age_gds.louvain_stream(
     AS 'age_gds', 'age_gds_louvain_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {relationshipWeightProperty, gamma,
+-- maxIterations, recurse, consecutiveIds, minCommunitySize}.
+CREATE FUNCTION age_gds.louvain_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_louvain_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.leiden_stream(
     graph_name                    text   DEFAULT NULL,
     age_graph                     text   DEFAULT NULL,
@@ -402,6 +411,15 @@ CREATE FUNCTION age_gds.leiden_stream(
     iterations                    int    DEFAULT 10
 ) RETURNS TABLE("nodeId" bigint, "communityId" bigint)
     AS 'age_gds', 'age_gds_leiden_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {relationshipWeightProperty, gamma,
+-- iterations}.
+CREATE FUNCTION age_gds.leiden_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_leiden_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.labelPropagation_stream(
@@ -417,6 +435,16 @@ CREATE FUNCTION age_gds.labelPropagation_stream(
     AS 'age_gds', 'age_gds_labelpropagation_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {relationshipWeightProperty,
+-- maxIterations, seedProperty, consecutiveIds}. seedProperty is refused
+-- (same NetworKit::PLP gap as the SQL entry point).
+CREATE FUNCTION age_gds.labelPropagation_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_labelpropagation_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.wcc_stream(
     graph_name                    text   DEFAULT NULL,
     age_graph                     text   DEFAULT NULL,
@@ -429,6 +457,15 @@ CREATE FUNCTION age_gds.wcc_stream(
     AS 'age_gds', 'age_gds_wcc_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {relationshipWeightProperty,
+-- threshold, consecutiveIds}.
+CREATE FUNCTION age_gds.wcc_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_wcc_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.scc_stream(
     graph_name       text   DEFAULT NULL,
     age_graph        text   DEFAULT NULL,
@@ -439,6 +476,14 @@ CREATE FUNCTION age_gds.scc_stream(
     AS 'age_gds', 'age_gds_scc_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {consecutiveIds}.
+CREATE FUNCTION age_gds.scc_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_scc_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.kCore_stream(
     graph_name text   DEFAULT NULL,
     age_graph  text   DEFAULT NULL,
@@ -446,6 +491,14 @@ CREATE FUNCTION age_gds.kCore_stream(
     edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "coreNumber" bigint)
     AS 'age_gds', 'age_gds_kcore_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: no per-algorithm config keys.
+CREATE FUNCTION age_gds.kCore_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_kcore_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.triangleCount_stream(
@@ -458,6 +511,14 @@ CREATE FUNCTION age_gds.triangleCount_stream(
     AS 'age_gds', 'age_gds_trianglecount_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {maxDegree}.
+CREATE FUNCTION age_gds.triangleCount_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_trianglecount_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.localClusteringCoefficient_stream(
     graph_name              text   DEFAULT NULL,
     age_graph               text   DEFAULT NULL,
@@ -466,6 +527,14 @@ CREATE FUNCTION age_gds.localClusteringCoefficient_stream(
     triangle_count_property text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, coefficient float8)
     AS 'age_gds', 'age_gds_localclusteringcoefficient_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {triangleCountProperty}.
+CREATE FUNCTION age_gds.localClusteringCoefficient_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_localclusteringcoefficient_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.modularity_stats(
@@ -477,6 +546,14 @@ CREATE FUNCTION age_gds.modularity_stats(
     relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE(modularity float8)
     AS 'age_gds', 'age_gds_modularity_stats'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {communityProperty, relationshipWeightProperty}.
+CREATE FUNCTION age_gds.modularity_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_modularity_stats_cypher'
     LANGUAGE C;
 
 -- gds.conductance: NetworKit::Conductance::getQuality(), which requires a
@@ -495,6 +572,15 @@ CREATE FUNCTION age_gds.conductance_stats(
     AS 'age_gds', 'age_gds_conductance_stats'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {communityProperty (required),
+-- relationshipWeightProperty}.
+CREATE FUNCTION age_gds.conductance_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_conductance_stats_cypher'
+    LANGUAGE C;
+
 -- gds.cliqueCounting: NetworKit::MaximalCliques(G, callback), counted and
 -- bucketed by clique size as cliques are emitted by the callback. Counts
 -- *maximal* cliques only (NetworKit has no all-cliques-of-every-size
@@ -507,6 +593,16 @@ CREATE FUNCTION age_gds.cliqueCounting_stats(
     edge_query text   DEFAULT NULL
 ) RETURNS TABLE(clique_size int, count bigint)
     AS 'age_gds', 'age_gds_cliquecounting_stats'
+    LANGUAGE C;
+
+-- Cypher-callable overload: no per-algorithm config keys. Array of
+-- {cliqueSize, count} maps (see src/algorithms/community.cpp for why this
+-- follows the array-of-maps shape despite the "_stats" name).
+CREATE FUNCTION age_gds.cliqueCounting_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_cliquecounting_stats_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

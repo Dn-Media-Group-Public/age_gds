@@ -46,6 +46,7 @@ extern "C" {
 #include "util/srf_helper.h"
 #include "util/weight_override.h"
 #include "util/partition_post.h"
+#include "util/cypher_agtype.h"
 
 /* helper: emit community partition rows, skipping nodes the partition left
  * unassigned (NetworKit::none) -- e.g. after filter_min_community_size(). */
@@ -61,6 +62,21 @@ static void emit_partition(SRFState &s,
         values[0] = Int64GetDatum(pg.id_map.resolve(u));
         values[1] = Int64GetDatum(comm);
         srf_emit(s, values, nulls);
+    });
+}
+
+/* Cypher-callable equivalent of emit_partition(): array of
+ * {nodeId, <key_name>} maps. */
+static void add_partition_rows_cypher(CypherResultBuilder &b, const ProjectedGraph &pg,
+                                      const NetworKit::Partition &part, const char *key_name)
+{
+    pg.graph.forNodes([&](NetworKit::node u) {
+        if (!part.contains(u))
+            return;
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key(key_name); b.add_int64((int64_t)part.subsetOf(u));
+        b.end_row();
     });
 }
 
@@ -154,6 +170,51 @@ Datum age_gds_louvain_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- louvain_stream (Cypher) -- */
+/* config: relationshipWeightProperty, gamma, maxIterations, recurse,
+ * consecutiveIds, minCommunitySize */
+
+PG_FUNCTION_INFO_V1(age_gds_louvain_stream_cypher);
+
+Datum age_gds_louvain_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"relationshipWeightProperty", "gamma", "maxIterations", "recurse",
+         "consecutiveIds", "minCommunitySize"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double gamma = 1.0;
+    int max_iter = 10, min_comm_size = 0;
+    bool recurse = true, want_consecutive = false;
+    cfg.get_double("gamma", gamma);
+    cfg.get_int("maxIterations", max_iter);
+    cfg.get_bool("recurse", recurse);
+    cfg.get_bool("consecutiveIds", want_consecutive);
+    cfg.get_int("minCommunitySize", min_comm_size);
+
+    NetworKit::PLM algo(pg.graph, false, gamma, "balanced",
+                        (NetworKit::count)max_iter, true, recurse);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("Louvain (PLM) failed: %s", ex.what())));
+    }
+
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+    if (min_comm_size > 1)
+        filter_min_community_size(part, (size_t)min_comm_size);
+
+    CypherResultBuilder b(true);
+    add_partition_rows_cypher(b, pg, part, "communityId");
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- leiden_stream ------------ */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=relationship_weight_property, 5=gamma, 6=iterations
@@ -188,6 +249,38 @@ Datum age_gds_leiden_stream(PG_FUNCTION_ARGS)
     SRFState s = srf_begin(fcinfo, 2, types);
     emit_partition(s, pg, algo.getPartition());
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- leiden_stream (Cypher) --- */
+/* config: relationshipWeightProperty, gamma, iterations */
+
+PG_FUNCTION_INFO_V1(age_gds_leiden_stream_cypher);
+
+Datum age_gds_leiden_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"relationshipWeightProperty", "gamma", "iterations"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double gamma = 1.0;
+    int iterations = 10;
+    cfg.get_double("gamma", gamma);
+    cfg.get_int("iterations", iterations);
+
+    NetworKit::ParallelLeiden algo(pg.graph, iterations, true, gamma);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("ParallelLeiden failed: %s", ex.what())));
+    }
+
+    CypherResultBuilder b(true);
+    add_partition_rows_cypher(b, pg, algo.getPartition(), "communityId");
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- labelPropagation_stream -- */
@@ -254,6 +347,53 @@ Datum age_gds_labelpropagation_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ------------------------------------- labelPropagation_stream (Cypher) -- */
+/* config: relationshipWeightProperty, maxIterations, seedProperty,
+ * consecutiveIds. seedProperty is refused, same NetworKit gap as the SQL
+ * entry point above. */
+
+PG_FUNCTION_INFO_V1(age_gds_labelpropagation_stream_cypher);
+
+Datum age_gds_labelpropagation_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"relationshipWeightProperty", "maxIterations", "seedProperty", "consecutiveIds"});
+
+    if (cfg.has("seedProperty"))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("labelPropagation_stream: seedProperty is not supported"),
+                 errdetail("Same NetworKit::PLP API gap as the SQL entry point's "
+                           "seed_property (see src/algorithms/community.cpp).")));
+
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    int max_iter = 0;
+    bool has_max_iter = cfg.get_int("maxIterations", max_iter);
+    bool want_consecutive = false;
+    cfg.get_bool("consecutiveIds", want_consecutive);
+
+    NetworKit::PLP algo(pg.graph, NetworKit::none,
+                        has_max_iter ? (NetworKit::count)max_iter : NetworKit::none);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("LabelPropagation (PLP) failed: %s", ex.what())));
+    }
+
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+
+    CypherResultBuilder b(true);
+    add_partition_rows_cypher(b, pg, part, "communityId");
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- wcc_stream --------------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=relationship_weight_property, 5=threshold, 6=consecutive_ids
@@ -318,6 +458,52 @@ Datum age_gds_wcc_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- wcc_stream (Cypher) ------ */
+/* config: relationshipWeightProperty, threshold, consecutiveIds */
+
+PG_FUNCTION_INFO_V1(age_gds_wcc_stream_cypher);
+
+Datum age_gds_wcc_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"relationshipWeightProperty", "threshold", "consecutiveIds"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double threshold = 0.0;
+    bool has_threshold = cfg.get_double("threshold", threshold);
+    bool want_consecutive = false;
+    cfg.get_bool("consecutiveIds", want_consecutive);
+
+    NetworKit::Graph filtered;
+    const NetworKit::Graph *graph_ptr = &pg.graph;
+    if (has_threshold) {
+        filtered = NetworKit::Graph(pg.graph.upperNodeIdBound(), true, pg.graph.isDirected());
+        pg.graph.forEdges([&](NetworKit::node u, NetworKit::node v, NetworKit::edgeweight w) {
+            if (w >= threshold) filtered.addEdge(u, v, w);
+        });
+        graph_ptr = &filtered;
+    }
+
+    NetworKit::ConnectedComponents algo(*graph_ptr);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("ConnectedComponents failed: %s", ex.what())));
+    }
+
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+
+    CypherResultBuilder b(true);
+    add_partition_rows_cypher(b, pg, part, "componentId");
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- scc_stream --------------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=consecutive_ids
@@ -354,6 +540,35 @@ Datum age_gds_scc_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- scc_stream (Cypher) ------ */
+/* config: consecutiveIds */
+
+PG_FUNCTION_INFO_V1(age_gds_scc_stream_cypher);
+
+Datum age_gds_scc_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {"consecutiveIds"});
+    const ProjectedGraph &pg = *gh.pg;
+    bool want_consecutive = false;
+    cfg.get_bool("consecutiveIds", want_consecutive);
+
+    NetworKit::StronglyConnectedComponents algo(pg.graph);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("StronglyConnectedComponents failed: %s", ex.what())));
+    }
+
+    NetworKit::Partition part = algo.getPartition();
+    if (want_consecutive)
+        consecutive_ids(part);
+
+    CypherResultBuilder b(true);
+    add_partition_rows_cypher(b, pg, part, "componentId");
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- kCore_stream ------------- */
 
 Datum age_gds_kcore_stream(PG_FUNCTION_ARGS)
@@ -380,6 +595,34 @@ Datum age_gds_kcore_stream(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- kCore_stream (Cypher) ---- */
+
+PG_FUNCTION_INFO_V1(age_gds_kcore_stream_cypher);
+
+Datum age_gds_kcore_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {});
+    const ProjectedGraph &pg = *gh.pg;
+
+    NetworKit::CoreDecomposition algo(pg.graph);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("CoreDecomposition failed: %s", ex.what())));
+    }
+    const auto &scores = algo.scores();
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("coreNumber"); b.add_int64((int64_t)scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- triangleCount_stream ----- */
@@ -424,6 +667,45 @@ Datum age_gds_trianglecount_stream(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- triangleCount (Cypher) --- */
+/* config: maxDegree */
+
+PG_FUNCTION_INFO_V1(age_gds_trianglecount_stream_cypher);
+
+Datum age_gds_trianglecount_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {"maxDegree"});
+    const ProjectedGraph &pg = *gh.pg;
+    int64_t max_degree = INT64_MAX;
+    cfg.get_int64("maxDegree", max_degree);
+
+    NetworKit::LocalClusteringCoefficient algo(pg.graph);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("LocalClusteringCoefficient failed: %s", ex.what())));
+    }
+    const auto &lcc = algo.scores();
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        double deg = (double)pg.graph.degree(u);
+        int64_t triangles;
+        if ((int64_t)pg.graph.degree(u) > max_degree)
+            triangles = -1;
+        else if (deg >= 2.0)
+            triangles = (int64_t)std::round(lcc[u] * deg * (deg - 1.0) / 2.0);
+        else
+            triangles = 0;
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("triangleCount"); b.add_int64(triangles);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- localClusteringCoefficient */
@@ -489,6 +771,58 @@ Datum age_gds_localclusteringcoefficient_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* --------------------------------- localClusteringCoefficient (Cypher) --- */
+/* config: triangleCountProperty */
+
+PG_FUNCTION_INFO_V1(age_gds_localclusteringcoefficient_stream_cypher);
+
+Datum age_gds_localclusteringcoefficient_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {"triangleCountProperty"});
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::string tc_prop;
+    bool has_tc_prop = cfg.get_string("triangleCountProperty", tc_prop);
+
+    std::vector<double> scores;
+    if (has_tc_prop) {
+        require_node_query(pg, "localClusteringCoefficient_stream's triangleCountProperty");
+        std::vector<double> triangles;
+        try {
+            triangles = read_node_property_as_values(
+                pg.graph, pg.id_map, pg.age_graph.c_str(), pg.node_query.c_str(),
+                tc_prop.c_str(), 0.0);
+        } catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("triangleCountProperty read failed for graph \"%s\": %s",
+                                   pg.name.c_str(), ex.what())));
+        }
+        scores.assign(pg.graph.upperNodeIdBound(), 0.0);
+        pg.graph.forNodes([&](NetworKit::node u) {
+            double deg = (double)pg.graph.degree(u);
+            scores[u] = (deg >= 2.0) ? (2.0 * triangles[u]) / (deg * (deg - 1.0)) : 0.0;
+        });
+    } else {
+        NetworKit::LocalClusteringCoefficient algo(pg.graph);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("LocalClusteringCoefficient failed: %s", ex.what())));
+        }
+        scores = algo.scores();
+    }
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("coefficient"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- modularity_stats --------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=community_property, 5=relationship_weight_property
@@ -542,6 +876,56 @@ Datum age_gds_modularity_stats(PG_FUNCTION_ARGS)
     srf_emit(s, values, nulls);
 
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- modularity_stats (Cypher) */
+/* config: communityProperty, relationshipWeightProperty */
+
+PG_FUNCTION_INFO_V1(age_gds_modularity_stats_cypher);
+
+Datum age_gds_modularity_stats_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"communityProperty", "relationshipWeightProperty"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::string comm_prop;
+    bool has_comm_prop = cfg.get_string("communityProperty", comm_prop);
+
+    NetworKit::Partition part;
+    if (has_comm_prop) {
+        require_node_query(pg, "modularity_stats's communityProperty");
+        try {
+            part = read_node_property_as_partition(
+                pg.graph, pg.id_map, pg.age_graph.c_str(), pg.node_query.c_str(),
+                comm_prop.c_str());
+        } catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("communityProperty read failed for graph \"%s\": %s",
+                                   pg.name.c_str(), ex.what())));
+        }
+    } else {
+        NetworKit::PLM plm(pg.graph);
+        try { plm.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("PLM (modularity) failed: %s", ex.what())));
+        }
+        part = plm.getPartition();
+    }
+
+    NetworKit::Modularity mod;
+    double mod_val = mod.getQuality(part, pg.graph);
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("modularity"); b.add_double(mod_val);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- conductance_stats -------- */
@@ -636,6 +1020,74 @@ Datum age_gds_conductance_stats(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- conductance_stats (Cypher) */
+/* config: communityProperty (required), relationshipWeightProperty */
+
+PG_FUNCTION_INFO_V1(age_gds_conductance_stats_cypher);
+
+Datum age_gds_conductance_stats_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"communityProperty", "relationshipWeightProperty"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::string comm_prop;
+    if (!cfg.get_string("communityProperty", comm_prop))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("conductance_stats requires config.communityProperty")));
+
+    require_node_query(pg, "conductance_stats's communityProperty");
+
+    std::vector<double> values;
+    const double MISSING = std::numeric_limits<double>::quiet_NaN();
+    try {
+        values = read_node_property_as_values(
+            pg.graph, pg.id_map, pg.age_graph.c_str(), pg.node_query.c_str(),
+            comm_prop.c_str(), MISSING);
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("communityProperty read failed for graph \"%s\": %s",
+                               pg.name.c_str(), ex.what())));
+    }
+
+    std::vector<NetworKit::index> ids(pg.graph.upperNodeIdBound(), NetworKit::none);
+    bool saw0 = false, saw1 = false;
+    pg.graph.forNodes([&](NetworKit::node u) {
+        double v = values[u];
+        if (v != 0.0 && v != 1.0)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("conductance_stats: communityProperty \"%s\" must be "
+                            "exactly 0 or 1 for every node (Conductance is only "
+                            "defined for 2-partitions); node %" PRId64 " has %s",
+                            comm_prop.c_str(), (int64_t)pg.id_map.resolve(u),
+                            std::isnan(v) ? "no value" : "a different value")));
+        ids[u] = (NetworKit::index)v;
+        if (v == 0.0) saw0 = true; else saw1 = true;
+    });
+    if (!saw0 || !saw1)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("conductance_stats: communityProperty \"%s\" must assign "
+                        "at least one node to each of community 0 and community 1",
+                        comm_prop.c_str())));
+
+    NetworKit::Partition part(ids);
+    part.setUpperBound(2);
+    NetworKit::Conductance cond;
+    double cond_val = cond.getQuality(part, pg.graph);
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("conductance"); b.add_double(cond_val);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- cliqueCounting_stats ----- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query
 //
@@ -685,6 +1137,50 @@ Datum age_gds_cliquecounting_stats(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     }
     return srf_end(s, fcinfo);
+}
+
+/* --------------------------------------- cliqueCounting_stats (Cypher) --- */
+/* No per-algorithm config keys. Despite the "_stats" name, the SQL entry
+ * point already returns multiple rows (bucketed by clique size); the
+ * Cypher overload follows that actual shape (array of maps), not the
+ * name-suffix convention. */
+
+PG_FUNCTION_INFO_V1(age_gds_cliquecounting_stats_cypher);
+
+Datum age_gds_cliquecounting_stats_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {});
+    const ProjectedGraph &pg = *gh.pg;
+
+    if (pg.graph.isDirected())
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("cliqueCounting_stats requires an undirected graph "
+                               "(cliques are not defined for directed edges); "
+                               "graph \"%s\" is directed", pg.name.c_str())));
+
+    std::map<size_t, int64_t> counts_by_size;
+    std::function<void(const std::vector<NetworKit::node> &)> cb =
+        [&](const std::vector<NetworKit::node> &clique) {
+            counts_by_size[clique.size()]++;
+        };
+
+    try {
+        NetworKit::MaximalCliques mc(pg.graph, cb);
+        mc.run();
+    } catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("MaximalCliques failed: %s", ex.what())));
+    }
+
+    CypherResultBuilder b(true);
+    for (const auto &[size, count] : counts_by_size) {
+        b.begin_row();
+        b.key("cliqueSize"); b.add_int64((int64_t)size);
+        b.key("count"); b.add_int64(count);
+        b.end_row();
+    }
+    PG_RETURN_DATUM(b.finish());
 }
 
 } /* extern "C" */
