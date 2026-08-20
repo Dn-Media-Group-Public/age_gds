@@ -1,6 +1,11 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION age_gds" to load this file. \quit
 
+-- Ensure age.so is resident before CREATE FUNCTION validates age_gds.so
+-- symbols (age_gds.so depends on agtype_in/agtype_out from age.so at
+-- dlopen time for the Cypher-callable (agtype, agtype) overloads below).
+LOAD '$libdir/age';
+
 CREATE SCHEMA IF NOT EXISTS age_gds;
 
 -- Returns extension version string; proves C++ entry point reachable
@@ -437,6 +442,17 @@ CREATE FUNCTION age_gds.bfs_stream(
     AS 'age_gds', 'age_gds_bfs_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {sourceNode, maxDepth, targetNodes}
+-- (plus ageGraph/nodeQuery/edgeQuery for anonymous mode). Returns a
+-- one-element array: {sourceNode, nodeIds}. See docs/api.md for why there
+-- is no `path` field.
+CREATE FUNCTION age_gds.bfs_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_bfs_stream_cypher'
+    LANGUAGE C;
+
 -- BREAKING CHANGE (docs/implemented-plans/03-pathfinding-parity.md): this
 -- used to be single-source-to-all (nodeId, distance) rows. It now matches
 -- Neo4j's actual split -- single source/target pair, path output. See
@@ -454,6 +470,15 @@ CREATE FUNCTION age_gds.shortestPath_dijkstra_stream(
     AS 'age_gds', 'age_gds_shortestpath_dijkstra_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {sourceNode, targetNode,
+-- relationshipWeightProperty}. One-element array: {totalCost, nodeIds, costs}.
+CREATE FUNCTION age_gds.shortestPath_dijkstra_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_shortestpath_dijkstra_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.allShortestPaths_dijkstra_stream(
     graph_name                    text     DEFAULT NULL,
     source_node                   bigint   DEFAULT NULL,
@@ -464,6 +489,15 @@ CREATE FUNCTION age_gds.allShortestPaths_dijkstra_stream(
     target_nodes                  bigint[] DEFAULT NULL
 ) RETURNS TABLE("targetNodeId" bigint, total_cost float8, node_ids bigint[], costs float8[])
     AS 'age_gds', 'age_gds_allshortestpaths_dijkstra_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {sourceNode, relationshipWeightProperty,
+-- targetNodes}. Array of maps: {targetNodeId, totalCost, nodeIds, costs}.
+CREATE FUNCTION age_gds.allShortestPaths_dijkstra_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_allshortestpaths_dijkstra_stream_cypher'
     LANGUAGE C;
 
 -- deltaStepping: NetworKit has no DeltaStepping class; Dijkstra used as
@@ -477,6 +511,14 @@ CREATE FUNCTION age_gds.deltaStepping_stream(
     edge_query  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_deltastepping_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {sourceNode}.
+CREATE FUNCTION age_gds.deltaStepping_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_deltastepping_stream_cypher'
     LANGUAGE C;
 
 -- bellmanFord: now backed by NetworKit::AlgebraicBellmanFord<CSRMatrix>
@@ -493,6 +535,14 @@ CREATE FUNCTION age_gds.bellmanFord_stream(
     AS 'age_gds', 'age_gds_bellmanford_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {sourceNode, relationshipWeightProperty}.
+CREATE FUNCTION age_gds.bellmanFord_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_bellmanford_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.bellmanFord_stats(
     graph_name                    text   DEFAULT NULL,
     source_node                   bigint DEFAULT NULL,
@@ -502,6 +552,13 @@ CREATE FUNCTION age_gds.bellmanFord_stats(
     relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("containsNegativeCycle" boolean, "computeMillis" bigint)
     AS 'age_gds', 'age_gds_bellmanford_stats'
+    LANGUAGE C;
+
+CREATE FUNCTION age_gds.bellmanFord_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_bellmanford_stats_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.dfs_stream(
@@ -514,6 +571,14 @@ CREATE FUNCTION age_gds.dfs_stream(
     target_nodes bigint[] DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, depth int)
     AS 'age_gds', 'age_gds_dfs_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {sourceNode, maxDepth, targetNodes}.
+CREATE FUNCTION age_gds.dfs_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_dfs_stream_cypher'
     LANGUAGE C;
 
 -- randomWalk: NetworKit has no RandomWalk class; delegates to
@@ -539,6 +604,15 @@ CREATE FUNCTION age_gds.randomWalk_stream(
     AS 'age_gds', 'age_gds_randomwalk_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {sourceNodes, walkLength, walksPerNode,
+-- inOutFactor, returnFactor, relationshipWeightProperty}.
+CREATE FUNCTION age_gds.randomWalk_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_randomwalk_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.spanningTree_stream(
     graph_name                    text   DEFAULT NULL,
     age_graph                     text   DEFAULT NULL,
@@ -551,6 +625,15 @@ CREATE FUNCTION age_gds.spanningTree_stream(
     AS 'age_gds', 'age_gds_spanningtree_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {objective, relationshipWeightProperty,
+-- sourceNode}.
+CREATE FUNCTION age_gds.spanningTree_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_spanningtree_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.allShortestPaths_stream(
     graph_name                    text   DEFAULT NULL,
     age_graph                     text   DEFAULT NULL,
@@ -559,6 +642,14 @@ CREATE FUNCTION age_gds.allShortestPaths_stream(
     relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("sourceNodeId" bigint, "targetNodeId" bigint, distance float8)
     AS 'age_gds', 'age_gds_allshortestpaths_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {relationshipWeightProperty}.
+CREATE FUNCTION age_gds.allShortestPaths_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_allshortestpaths_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.maxFlow_stats(
@@ -574,6 +665,15 @@ CREATE FUNCTION age_gds.maxFlow_stats(
     node_capacity_property  text     DEFAULT NULL
 ) RETURNS TABLE(flow float8, "computeMillis" bigint)
     AS 'age_gds', 'age_gds_maxflow_stats'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {sourceNode, targetNode,
+-- capacityProperty, sourceNodes, targetNodes, nodeCapacityProperty}.
+CREATE FUNCTION age_gds.maxFlow_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_maxflow_stats_cypher'
     LANGUAGE C;
 
 -- gds.shortestPath.astar.stream: haversine-distance heuristic computed from
@@ -592,6 +692,15 @@ CREATE FUNCTION age_gds.shortestPath_astar_stream(
     AS 'age_gds', 'age_gds_shortestpath_astar_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {sourceNode, targetNode,
+-- latitudeProperty, longitudeProperty, relationshipWeightProperty}.
+CREATE FUNCTION age_gds.shortestPath_astar_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_shortestpath_astar_stream_cypher'
+    LANGUAGE C;
+
 -- gds.minCostMaxFlow: NetworKit::SuccessiveShortestPathMinCostFlow. `alpha`
 -- (cost-scaling) is not exposed by this class and is unsupported.
 CREATE FUNCTION age_gds.minCostMaxFlow_stats(
@@ -608,6 +717,15 @@ CREATE FUNCTION age_gds.minCostMaxFlow_stats(
     AS 'age_gds', 'age_gds_mincostmaxflow_stats'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {capacityProperty, costProperty,
+-- sourceNodes, targetNodes, nodeCapacityProperty}.
+CREATE FUNCTION age_gds.minCostMaxFlow_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_mincostmaxflow_stats_cypher'
+    LANGUAGE C;
+
 -- gds.dag.topologicalSort: NetworKit::TopologicalSort. max_distance is a
 -- linear DP pass over the computed order, only populated (non-NULL) when
 -- compute_max_distance_from_source is true. Errors if the graph is not a
@@ -620,6 +738,14 @@ CREATE FUNCTION age_gds.topologicalSort_stream(
     edge_query                     text    DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, "sortIndex" int, "maxDistance" int)
     AS 'age_gds', 'age_gds_topologicalsort_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {computeMaxDistanceFromSource}.
+CREATE FUNCTION age_gds.topologicalSort_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_topologicalsort_stream_cypher'
     LANGUAGE C;
 
 -- gds.dag.longestPath: NetworKit::TopologicalSort + weighted DP pass
@@ -635,6 +761,14 @@ CREATE FUNCTION age_gds.longestPath_stream(
     AS 'age_gds', 'age_gds_longestpath_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {relationshipWeightProperty}.
+CREATE FUNCTION age_gds.longestPath_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_longestpath_stream_cypher'
+    LANGUAGE C;
+
 -- gds.bridges: no dedicated NetworKit class; derived from
 -- BiconnectedComponents (same class articulationPoints_stream uses) -- an
 -- edge is a bridge iff it is the sole edge of its biconnected component,
@@ -647,6 +781,15 @@ CREATE FUNCTION age_gds.bridges_stream(
     edge_query text   DEFAULT NULL
 ) RETURNS TABLE(src bigint, dst bigint)
     AS 'age_gds', 'age_gds_bridges_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload (docs/implemented-plans/cypher-callable-interface.md):
+-- UNWIND age_gds.bridges_stream(graphName, config) AS row RETURN row.src, row.dst
+CREATE FUNCTION age_gds.bridges_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_bridges_stream_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

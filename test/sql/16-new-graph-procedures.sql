@@ -180,6 +180,16 @@ SELECT age_gds.graph_project(
 SELECT count(*) FROM age_gds.bridges_stream(graph_name => 'bridgeproj');
 -- expected: 3 (every edge in a path graph is a bridge)
 
+-- Cypher-callable overload (docs/implemented-plans/cypher-callable-interface.md):
+-- age_gds.bridges_stream(graphName agtype, config agtype) called as a
+-- scalar expression inside cypher(), UNWIND-ed instead of YIELD-ed.
+SELECT * FROM cypher('bridgetest', $$
+    UNWIND age_gds.bridges_stream('bridgeproj', {}) AS row
+    RETURN row.src, row.dst
+$$) AS (src agtype, dst agtype)
+ORDER BY (src::text), (dst::text);
+-- expected: 3 rows
+
 -- Adding an edge that closes a-b-c into a triangle removes those two edges
 -- (a-b, b-c) from the bridge set, leaving only c-d.
 SELECT * FROM cypher('bridgetest', $$

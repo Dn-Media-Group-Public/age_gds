@@ -1,3 +1,4 @@
 comment = 'AGE Graph Data Science extension'
 default_version = '1.0'
 relocatable = false
+requires = 'age'

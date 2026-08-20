@@ -20,6 +20,16 @@ execute_process(COMMAND ${PG_CONFIG} --pkglibdir
 execute_process(COMMAND ${PG_CONFIG} --sharedir
     OUTPUT_VARIABLE PG_SHAREDIR OUTPUT_STRIP_TRAILING_WHITESPACE)
 
+# Apache AGE (age.so) -- Cypher-callable (agtype, agtype) overloads call
+# agtype_in/agtype_out across this link. AGE's PostgreSQL module has no
+# "lib" prefix (age.so, not libage.so); find_file (not find_library, which
+# assumes the lib* convention) just verifies it is installed. Linking uses
+# GNU ld's "-l:exact_filename" form via target_link_directories/
+# target_link_libraries below -- passing the absolute path directly makes
+# CMake collapse it back to a bare "-lage" (since its directory is already
+# on the link search path), which then fails because there is no libage.so.
+find_file(AGE_LIBRARY age.so PATHS ${PG_PKGLIBDIR} REQUIRED)
+
 add_library(age_gds MODULE
     src/age_gds.cpp
     src/catalog/serialization.cpp
@@ -29,6 +39,7 @@ add_library(age_gds MODULE
     src/catalog/graph_index.cpp
     src/bridge/age_loader.cpp
     src/util/config_parser.cpp
+    src/util/cypher_agtype.cpp
     src/util/srf_helper.cpp
     src/util/writeback.cpp
     src/util/weight_override.cpp
@@ -62,11 +73,22 @@ target_include_directories(age_gds PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/networkit/networkit/cpp/embedding
 )
 
-# Link NetworKit and OpenMP
-target_link_libraries(age_gds PRIVATE networkit OpenMP::OpenMP_CXX)
+# Link NetworKit, OpenMP and AGE
+target_link_directories(age_gds PRIVATE ${PG_PKGLIBDIR})
+target_link_libraries(age_gds PRIVATE networkit OpenMP::OpenMP_CXX -l:age.so)
 
 set_target_properties(age_gds PROPERTIES PREFIX "")
 target_link_options(age_gds PRIVATE -Wl,--allow-shlib-undefined)
+
+# age_gds.so's DT_NEEDED entry for "age.so" (from -l:age.so above) has no
+# lib*.so name ld.so would find via the default search path -- without an
+# RPATH pointing at PG_PKGLIBDIR, `CREATE EXTENSION age_gds`'s dlopen fails
+# at runtime even though age.so is already resident. CMake clears RPATH on
+# install by default; set INSTALL_RPATH explicitly to keep it.
+set_target_properties(age_gds PROPERTIES
+    INSTALL_RPATH "${PG_PKGLIBDIR}"
+    BUILD_WITH_INSTALL_RPATH TRUE
+)
 
 install(TARGETS age_gds DESTINATION ${PG_PKGLIBDIR})
 install(FILES age_gds.control DESTINATION ${PG_SHAREDIR}/extension)

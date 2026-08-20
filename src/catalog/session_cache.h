@@ -6,6 +6,7 @@
 #include "bridge/node_id_map.h"
 #include "bridge/age_loader.h"
 #include "util/pair_hash.h"
+#include "util/cypher_agtype.h"
 
 #include <string>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 struct ProjectedGraph {
     std::string              name;
@@ -120,3 +122,20 @@ GraphHandle get_or_load_graph(
     bool        directed = false,
     bool        weighted = false
 );
+
+// -------------------------------------------------------------------
+// Cypher-callable (agtype, agtype) overload helper
+// -------------------------------------------------------------------
+
+// Shared graphName/config resolution for every Cypher-callable wrapper
+// (docs/implemented-plans/cypher-callable-interface.md): arg
+// `graph_name_argno` is the graphName agtype (string, or NULL for
+// anonymous mode); arg `config_argno` is the config agtype map, which
+// (in anonymous mode) must carry "ageGraph"/"nodeQuery"/"edgeQuery" and
+// may carry any of `extra_config_keys` -- any other top-level key is a
+// validation error. `cfg_out` is left holding the parsed config so the
+// caller can pull its own per-algorithm keys out of it.
+GraphHandle resolve_cypher_graph(
+    FunctionCallInfo fcinfo, int graph_name_argno, int config_argno,
+    CypherConfig &cfg_out,
+    const std::vector<std::string> &extra_config_keys);

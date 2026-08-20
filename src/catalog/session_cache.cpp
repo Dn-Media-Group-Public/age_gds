@@ -504,3 +504,30 @@ Datum age_gds_cache_stats(PG_FUNCTION_ARGS)
 }
 
 } /* extern "C" */
+
+GraphHandle resolve_cypher_graph(
+    FunctionCallInfo fcinfo, int graph_name_argno, int config_argno,
+    CypherConfig &cfg_out,
+    const std::vector<std::string> &extra_config_keys)
+{
+    bool has_graph_name = !agtype_arg_is_null(fcinfo, graph_name_argno);
+    std::string graph_name = has_graph_name
+        ? get_agtype_arg_string(fcinfo, graph_name_argno, "graphName") : "";
+
+    cfg_out = parse_cypher_config(fcinfo, config_argno);
+
+    std::vector<std::string> known_keys = {"ageGraph", "nodeQuery", "edgeQuery"};
+    known_keys.insert(known_keys.end(), extra_config_keys.begin(), extra_config_keys.end());
+    cfg_out.validate_keys(known_keys);
+
+    std::string age_graph, node_query, edge_query;
+    bool has_ag = cfg_out.get_string("ageGraph", age_graph);
+    bool has_nq = cfg_out.get_string("nodeQuery", node_query);
+    bool has_eq = cfg_out.get_string("edgeQuery", edge_query);
+
+    return get_or_load_graph(
+        has_graph_name ? graph_name.c_str() : nullptr,
+        has_ag ? age_graph.c_str() : nullptr,
+        has_nq ? node_query.c_str() : nullptr,
+        has_eq ? edge_query.c_str() : nullptr);
+}
