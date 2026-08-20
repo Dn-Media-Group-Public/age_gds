@@ -12,6 +12,7 @@
 
 #include "util/writeback.h"
 #include "util/config_parser.h"
+#include "util/cypher_agtype.h"
 #include "catalog/session_cache.h"
 
 #include <string>
@@ -169,6 +170,50 @@ Datum age_gds_pagerank_write(PG_FUNCTION_ARGS)
     PG_RETURN_VOID();
 }
 
+/* ------------------------------------ pageRank_write (Cypher) ------------ */
+/* config: writeProperty, dampingFactor, maxIterations, tolerance */
+
+PG_FUNCTION_INFO_V1(age_gds_pagerank_write_cypher);
+
+Datum age_gds_pagerank_write_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    bool has_graph_name = !agtype_arg_is_null(fcinfo, 0);
+    std::string graph_name = has_graph_name ? get_agtype_arg_string(fcinfo, 0, "graphName") : "";
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"writeProperty", "dampingFactor", "maxIterations", "tolerance"});
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::string prop = "pagerank";
+    cfg.get_string("writeProperty", prop);
+    double damping = 0.85, tolerance = 1e-7;
+    int max_iter = 20;
+    cfg.get_double("dampingFactor", damping);
+    cfg.get_int("maxIterations", max_iter);
+    cfg.get_double("tolerance", tolerance);
+
+    std::string wb_age_graph = has_graph_name ? lookup_age_graph(graph_name.c_str()) : pg.age_graph;
+
+    NetworKit::PageRank pr(pg.graph, damping, tolerance);
+    pr.maxIterations = (NetworKit::count)max_iter;
+    try { pr.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("pageRank_write: PageRank failed: %s", ex.what())));
+    }
+    const auto &scores = pr.scores();
+
+    std::unordered_map<int64_t, double> score_map;
+    pg.graph.forNodes([&](NetworKit::node u) { score_map[pg.id_map.resolve(u)] = scores[u]; });
+    writeback_scores(wb_age_graph.c_str(), prop.c_str(), score_map);
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("nodePropertiesWritten"); b.add_int64((int64_t)score_map.size());
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ------------------------------------------ betweenness_write ------------ */
 // Args: 0=graph_name, 1=write_property, 2=age_graph,
 //       3=node_query, 4=edge_query
@@ -208,6 +253,43 @@ Datum age_gds_betweenness_write(PG_FUNCTION_ARGS)
     writeback_scores(wb_age_graph.c_str(), prop, score_map);
 
     PG_RETURN_VOID();
+}
+
+/* ------------------------------------ betweenness_write (Cypher) --------- */
+/* config: writeProperty */
+
+PG_FUNCTION_INFO_V1(age_gds_betweenness_write_cypher);
+
+Datum age_gds_betweenness_write_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    bool has_graph_name = !agtype_arg_is_null(fcinfo, 0);
+    std::string graph_name = has_graph_name ? get_agtype_arg_string(fcinfo, 0, "graphName") : "";
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {"writeProperty"});
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::string prop = "betweenness";
+    cfg.get_string("writeProperty", prop);
+
+    std::string wb_age_graph = has_graph_name ? lookup_age_graph(graph_name.c_str()) : pg.age_graph;
+
+    NetworKit::Betweenness algo(pg.graph, false);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("betweenness_write: Betweenness failed: %s", ex.what())));
+    }
+    const auto &scores = algo.scores();
+
+    std::unordered_map<int64_t, double> score_map;
+    pg.graph.forNodes([&](NetworKit::node u) { score_map[pg.id_map.resolve(u)] = scores[u]; });
+    writeback_scores(wb_age_graph.c_str(), prop.c_str(), score_map);
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("nodePropertiesWritten"); b.add_int64((int64_t)score_map.size());
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
 }
 
 } /* extern "C" */

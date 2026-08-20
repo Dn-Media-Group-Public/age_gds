@@ -175,6 +175,15 @@ CREATE FUNCTION age_gds.pageRank_stream(
     AS 'age_gds', 'age_gds_pagerank_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {dampingFactor, maxIterations,
+-- tolerance, relationshipWeightProperty, scaler}.
+CREATE FUNCTION age_gds.pageRank_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_pagerank_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.pageRank_stats(
     graph_name                    text   DEFAULT NULL,
     damping_factor                float8 DEFAULT NULL,
@@ -189,6 +198,14 @@ CREATE FUNCTION age_gds.pageRank_stats(
 ) RETURNS TABLE("ranIterations" int, "didConverge" bool, "computeMillis" bigint,
                 "minScore" float8, "maxScore" float8, "meanScore" float8)
     AS 'age_gds', 'age_gds_pagerank_stats'
+    LANGUAGE C;
+
+-- Cypher-callable overload: same config keys as pageRank_stream.
+CREATE FUNCTION age_gds.pageRank_stats(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_pagerank_stats_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------
@@ -207,6 +224,15 @@ CREATE FUNCTION age_gds.betweenness_stream(
     AS 'age_gds', 'age_gds_betweenness_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {samplingSize, samplingSeed,
+-- relationshipWeightProperty}.
+CREATE FUNCTION age_gds.betweenness_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_betweenness_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.closeness_stream(
     graph_name          text    DEFAULT NULL,
     age_graph           text    DEFAULT NULL,
@@ -215,6 +241,14 @@ CREATE FUNCTION age_gds.closeness_stream(
     use_wasserman_faust boolean DEFAULT false
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_closeness_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {useWassermanFaust}.
+CREATE FUNCTION age_gds.closeness_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_closeness_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.harmonicCentrality_stream(
@@ -226,6 +260,14 @@ CREATE FUNCTION age_gds.harmonicCentrality_stream(
     AS 'age_gds', 'age_gds_harmoniccentrality_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: no per-algorithm config keys.
+CREATE FUNCTION age_gds.harmonicCentrality_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_harmoniccentrality_stream_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.degree_stream(
     graph_name                    text   DEFAULT NULL,
     age_graph                     text   DEFAULT NULL,
@@ -235,6 +277,14 @@ CREATE FUNCTION age_gds.degree_stream(
     relationship_weight_property  text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_degree_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {orientation, relationshipWeightProperty}.
+CREATE FUNCTION age_gds.degree_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_degree_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.eigenvector_stream(
@@ -249,6 +299,14 @@ CREATE FUNCTION age_gds.eigenvector_stream(
     AS 'age_gds', 'age_gds_eigenvector_stream'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {tolerance, relationshipWeightProperty, scaler}.
+CREATE FUNCTION age_gds.eigenvector_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_eigenvector_stream_cypher'
+    LANGUAGE C;
+
 -- HITS: NetworKit has no HITS class; EigenvectorCentrality used for both
 -- hub and auth scores (equivalent for undirected graphs).
 CREATE FUNCTION age_gds.hits_stream(
@@ -258,6 +316,14 @@ CREATE FUNCTION age_gds.hits_stream(
     edge_query text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, auth float8, hub float8)
     AS 'age_gds', 'age_gds_hits_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: no per-algorithm config keys.
+CREATE FUNCTION age_gds.hits_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_hits_stream_cypher'
     LANGUAGE C;
 
 CREATE FUNCTION age_gds.articleRank_stream(
@@ -271,6 +337,15 @@ CREATE FUNCTION age_gds.articleRank_stream(
     scaler                        text   DEFAULT NULL
 ) RETURNS TABLE("nodeId" bigint, score float8)
     AS 'age_gds', 'age_gds_articlerank_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {dampingFactor, tolerance,
+-- relationshipWeightProperty, scaler}.
+CREATE FUNCTION age_gds.articleRank_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_articlerank_stream_cypher'
     LANGUAGE C;
 
 -- articulationPoints: uses BiconnectedComponents (no dedicated class in
@@ -288,6 +363,14 @@ CREATE FUNCTION age_gds.articulationPoints_stream(
     "resultingComponentMax"   int
 )
     AS 'age_gds', 'age_gds_articulationpoints_stream'
+    LANGUAGE C;
+
+-- Cypher-callable overload: no per-algorithm config keys.
+CREATE FUNCTION age_gds.articulationPoints_stream(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_articulationpoints_stream_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------
@@ -809,6 +892,17 @@ CREATE FUNCTION age_gds.pageRank_write(
     AS 'age_gds', 'age_gds_pagerank_write'
     LANGUAGE C;
 
+-- Cypher-callable overload: config = {writeProperty, dampingFactor,
+-- maxIterations, tolerance}. Returns a single map {nodePropertiesWritten}
+-- (Neo4j's own write-procedure convention) instead of void, since a
+-- Cypher-callable function must return agtype.
+CREATE FUNCTION age_gds.pageRank_write(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_pagerank_write_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.betweenness_write(
     graph_name      text    DEFAULT NULL,
     write_property  text    DEFAULT 'betweenness',
@@ -817,6 +911,15 @@ CREATE FUNCTION age_gds.betweenness_write(
     edge_query      text    DEFAULT NULL
 ) RETURNS void
     AS 'age_gds', 'age_gds_betweenness_write'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {writeProperty}. Returns a single map
+-- {nodePropertiesWritten}, same convention as pageRank_write above.
+CREATE FUNCTION age_gds.betweenness_write(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_betweenness_write_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------

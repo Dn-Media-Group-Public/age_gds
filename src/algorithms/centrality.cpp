@@ -45,6 +45,8 @@ extern "C" {
 #include "util/srf_helper.h"
 #include "util/weight_override.h"
 #include "util/scaler.h"
+#include "util/cypher_agtype.h"
+#include "util/writeback.h"
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -125,6 +127,21 @@ PG_FUNCTION_INFO_V1(age_gds_hits_stream);
 PG_FUNCTION_INFO_V1(age_gds_articlerank_stream);
 PG_FUNCTION_INFO_V1(age_gds_articulationpoints_stream);
 
+/* Shared config-driven PageRank runner for the Cypher wrappers (pageRank_stream/
+ * _stats, articleRank_stream reuse the same PageRank class + config keys). */
+static void run_pagerank_cypher(const ProjectedGraph &pg, double damping, int max_iter,
+                                double tolerance, NetworKit::PageRank **out)
+{
+    *out = new NetworKit::PageRank(pg.graph, damping, tolerance);
+    (*out)->maxIterations = (NetworKit::count)max_iter;
+    try { (*out)->run(); }
+    catch (const std::exception &ex) {
+        delete *out;
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("PageRank failed: %s", ex.what())));
+    }
+}
+
 /* ---------------------------------------------- pageRank_stream ---------- */
 
 Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
@@ -163,6 +180,46 @@ Datum age_gds_pagerank_stream(PG_FUNCTION_ARGS)
     });
 
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- pageRank_stream (Cypher) - */
+/* config: dampingFactor, maxIterations, tolerance, relationshipWeightProperty,
+ * scaler */
+
+PG_FUNCTION_INFO_V1(age_gds_pagerank_stream_cypher);
+
+Datum age_gds_pagerank_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"dampingFactor", "maxIterations", "tolerance", "relationshipWeightProperty", "scaler"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double damping = 0.85, tolerance = 1e-7;
+    int max_iter = 20;
+    cfg.get_double("dampingFactor", damping);
+    cfg.get_int("maxIterations", max_iter);
+    cfg.get_double("tolerance", tolerance);
+    std::string scaler;
+    cfg.get_string("scaler", scaler);
+
+    NetworKit::PageRank *pr = nullptr;
+    run_pagerank_cypher(pg, damping, max_iter, tolerance, &pr);
+    std::vector<double> scores = pr->scores();
+    delete pr;
+    apply_scaler_checked(scores, scaler);
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- pageRank_stats ----------- */
@@ -230,6 +287,63 @@ Datum age_gds_pagerank_stats(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- pageRank_stats (Cypher) -- */
+
+PG_FUNCTION_INFO_V1(age_gds_pagerank_stats_cypher);
+
+Datum age_gds_pagerank_stats_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"dampingFactor", "maxIterations", "tolerance", "relationshipWeightProperty", "scaler"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double damping = 0.85, tolerance = 1e-7;
+    int max_iter = 20;
+    cfg.get_double("dampingFactor", damping);
+    cfg.get_int("maxIterations", max_iter);
+    cfg.get_double("tolerance", tolerance);
+    std::string scaler;
+    cfg.get_string("scaler", scaler);
+
+    auto t0 = std::chrono::steady_clock::now();
+    NetworKit::PageRank *pr = nullptr;
+    run_pagerank_cypher(pg, damping, max_iter, tolerance, &pr);
+    auto t1 = std::chrono::steady_clock::now();
+    int64_t compute_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    std::vector<double> scores = pr->scores();
+    NetworKit::count ran_iter = pr->numberOfIterations();
+    bool converged = ran_iter < (NetworKit::count)max_iter;
+    delete pr;
+    apply_scaler_checked(scores, scaler);
+
+    double min_score = 0.0, max_score = 0.0, mean_score = 0.0;
+    uint64_t n = 0;
+    pg.graph.forNodes([&](NetworKit::node u) {
+        double sc = scores[u];
+        if (n == 0) min_score = max_score = sc;
+        else { if (sc < min_score) min_score = sc; if (sc > max_score) max_score = sc; }
+        mean_score += sc;
+        ++n;
+    });
+    if (n > 0) mean_score /= (double)n;
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("ranIterations"); b.add_int64((int64_t)ran_iter);
+    b.key("didConverge"); b.add_bool(converged);
+    b.key("computeMillis"); b.add_int64(compute_ms);
+    b.key("minScore"); b.add_double(min_score);
+    b.key("maxScore"); b.add_double(max_score);
+    b.key("meanScore"); b.add_double(mean_score);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- betweenness_stream ------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=sampling_size, 5=sampling_seed, 6=relationship_weight_property
@@ -292,6 +406,60 @@ Datum age_gds_betweenness_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- betweenness_stream (Cypher) */
+/* config: samplingSize, samplingSeed, relationshipWeightProperty */
+
+PG_FUNCTION_INFO_V1(age_gds_betweenness_stream_cypher);
+
+Datum age_gds_betweenness_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"samplingSize", "samplingSeed", "relationshipWeightProperty"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    int sampling_size = 0, sampling_seed = 0;
+    bool has_sampling_size = cfg.get_int("samplingSize", sampling_size);
+    bool has_sampling_seed = cfg.get_int("samplingSeed", sampling_seed);
+    if (has_sampling_size && sampling_size <= 0)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("config.samplingSize must be a positive integer")));
+
+    std::vector<double> scores;
+    if (has_sampling_size) {
+        if (has_sampling_seed)
+            Aux::Random::setSeed((uint64_t)sampling_seed, false);
+        double epsilon = 1.0 / std::sqrt((double)sampling_size);
+        NetworKit::ApproxBetweenness algo(pg.graph, epsilon, 0.1);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("ApproxBetweenness failed: %s", ex.what())));
+        }
+        scores = algo.scores();
+    } else {
+        NetworKit::Betweenness algo(pg.graph, false);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("Betweenness failed: %s", ex.what())));
+        }
+        scores = algo.scores();
+    }
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- closeness_stream --------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=use_wasserman_faust
@@ -329,6 +497,41 @@ Datum age_gds_closeness_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- closeness_stream (Cypher) */
+/* config: useWassermanFaust */
+
+PG_FUNCTION_INFO_V1(age_gds_closeness_stream_cypher);
+
+Datum age_gds_closeness_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {"useWassermanFaust"});
+    const ProjectedGraph &pg = *gh.pg;
+
+    bool use_wasserman_faust = false;
+    cfg.get_bool("useWassermanFaust", use_wasserman_faust);
+    NetworKit::ClosenessVariant variant = use_wasserman_faust
+        ? NetworKit::ClosenessVariant::STANDARD
+        : NetworKit::ClosenessVariant::GENERALIZED;
+
+    NetworKit::Closeness algo(pg.graph, false, variant);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("Closeness failed: %s", ex.what())));
+    }
+    const auto &scores = algo.scores();
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- harmonicCentrality_stream  */
 
 Datum age_gds_harmoniccentrality_stream(PG_FUNCTION_ARGS)
@@ -354,6 +557,34 @@ Datum age_gds_harmoniccentrality_stream(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- harmonicCentrality (Cypher) */
+
+PG_FUNCTION_INFO_V1(age_gds_harmoniccentrality_stream_cypher);
+
+Datum age_gds_harmoniccentrality_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {});
+    const ProjectedGraph &pg = *gh.pg;
+
+    NetworKit::HarmonicCloseness algo(pg.graph, false);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("HarmonicCloseness failed: %s", ex.what())));
+    }
+    const auto &scores = algo.scores();
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- degree_stream ------------ */
@@ -453,6 +684,75 @@ Datum age_gds_degree_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- degree_stream (Cypher) --- */
+/* config: orientation, relationshipWeightProperty */
+
+PG_FUNCTION_INFO_V1(age_gds_degree_stream_cypher);
+
+Datum age_gds_degree_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"orientation", "relationshipWeightProperty"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    std::string orient_str = "NATURAL";
+    cfg.get_string("orientation", orient_str);
+    DegreeOrientation orientation = parse_orientation(orient_str.c_str());
+
+    std::vector<double> scores(pg.graph.upperNodeIdBound(), 0.0);
+    if (has_wprop) {
+        pg.graph.forNodes([&](NetworKit::node u) {
+            switch (orientation) {
+            case DegreeOrientation::NATURAL:
+                scores[u] = pg.graph.weightedDegree(u);
+                break;
+            case DegreeOrientation::REVERSE:
+                scores[u] = pg.graph.weightedDegreeIn(u);
+                break;
+            case DegreeOrientation::UNDIRECTED:
+                scores[u] = pg.graph.isDirected()
+                    ? pg.graph.weightedDegree(u) + pg.graph.weightedDegreeIn(u)
+                    : pg.graph.weightedDegree(u);
+                break;
+            }
+        });
+    } else {
+        bool outDeg = (orientation != DegreeOrientation::REVERSE);
+        NetworKit::DegreeCentrality algo(pg.graph, false, outDeg);
+        try { algo.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("DegreeCentrality failed: %s", ex.what())));
+        }
+        const auto &deg_scores = algo.scores();
+        if (orientation == DegreeOrientation::UNDIRECTED && pg.graph.isDirected()) {
+            NetworKit::DegreeCentrality algo_in(pg.graph, false, false);
+            try { algo_in.run(); }
+            catch (const std::exception &ex) {
+                ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                                errmsg("DegreeCentrality failed: %s", ex.what())));
+            }
+            const auto &in_scores = algo_in.scores();
+            pg.graph.forNodes([&](NetworKit::node u) { scores[u] = deg_scores[u] + in_scores[u]; });
+        } else {
+            pg.graph.forNodes([&](NetworKit::node u) { scores[u] = deg_scores[u]; });
+        }
+    }
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- eigenvector_stream ------- */
 // arg layout: 0=graph_name, 1=age_graph, 2=node_query, 3=edge_query,
 //             4=tolerance, 5=relationship_weight_property, 6=scaler
@@ -493,6 +793,45 @@ Datum age_gds_eigenvector_stream(PG_FUNCTION_ARGS)
     return srf_end(s, fcinfo);
 }
 
+/* ---------------------------------------------- eigenvector_stream (Cypher) */
+/* config: tolerance, relationshipWeightProperty, scaler */
+
+PG_FUNCTION_INFO_V1(age_gds_eigenvector_stream_cypher);
+
+Datum age_gds_eigenvector_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"tolerance", "relationshipWeightProperty", "scaler"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double tolerance = 1e-7;
+    cfg.get_double("tolerance", tolerance);
+    std::string scaler;
+    cfg.get_string("scaler", scaler);
+
+    NetworKit::EigenvectorCentrality algo(pg.graph, tolerance);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("EigenvectorCentrality failed: %s", ex.what())));
+    }
+    std::vector<double> scores = algo.scores();
+    apply_scaler_checked(scores, scaler);
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* ---------------------------------------------- hits_stream -------------- */
 // NetworKit has no HITS class. Substitute: EigenvectorCentrality scores
 // for both hub and auth (equivalent for undirected graphs; for directed
@@ -524,6 +863,36 @@ Datum age_gds_hits_stream(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- hits_stream (Cypher) ----- */
+
+PG_FUNCTION_INFO_V1(age_gds_hits_stream_cypher);
+
+Datum age_gds_hits_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {});
+    const ProjectedGraph &pg = *gh.pg;
+
+    NetworKit::EigenvectorCentrality algo(pg.graph);
+    try { algo.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("EigenvectorCentrality (HITS substitute) failed: %s", ex.what())));
+    }
+    const auto &scores = algo.scores();
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        double sc = scores[u];
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("auth"); b.add_double(sc);
+        b.key("hub"); b.add_double(sc);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- articleRank_stream ------- */
@@ -571,6 +940,47 @@ Datum age_gds_articlerank_stream(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
+}
+
+/* ---------------------------------------------- articleRank_stream (Cypher) */
+/* config: dampingFactor, tolerance, relationshipWeightProperty, scaler */
+
+PG_FUNCTION_INFO_V1(age_gds_articlerank_stream_cypher);
+
+Datum age_gds_articlerank_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg,
+        {"dampingFactor", "tolerance", "relationshipWeightProperty", "scaler"});
+    std::string wprop;
+    bool has_wprop = cfg.get_string("relationshipWeightProperty", wprop);
+    apply_weight_override(gh, has_wprop ? wprop.c_str() : nullptr);
+    const ProjectedGraph &pg = *gh.pg;
+
+    double damping = 0.85, tolerance = 1e-7;
+    cfg.get_double("dampingFactor", damping);
+    cfg.get_double("tolerance", tolerance);
+    std::string scaler;
+    cfg.get_string("scaler", scaler);
+
+    NetworKit::PageRank pr(pg.graph, damping, tolerance);
+    pr.maxIterations = 20;
+    try { pr.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("ArticleRank (PageRank) failed: %s", ex.what())));
+    }
+    std::vector<double> scores = pr.scores();
+    apply_scaler_checked(scores, scaler);
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("score"); b.add_double(scores[u]);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ---------------------------------------------- articulationPoints_stream  */
@@ -635,6 +1045,59 @@ Datum age_gds_articulationpoints_stream(PG_FUNCTION_ARGS)
         srf_emit(s, values, nulls);
     });
     return srf_end(s, fcinfo);
+}
+
+/* ----------------------------------- articulationPoints_stream (Cypher) -- */
+
+PG_FUNCTION_INFO_V1(age_gds_articulationpoints_stream_cypher);
+
+Datum age_gds_articulationpoints_stream_cypher(PG_FUNCTION_ARGS)
+{
+    CypherConfig cfg;
+    GraphHandle gh = resolve_cypher_graph(fcinfo, 0, 1, cfg, {});
+    const ProjectedGraph &pg = *gh.pg;
+
+    NetworKit::BiconnectedComponents bcc(pg.graph);
+    try { bcc.run(); }
+    catch (const std::exception &ex) {
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("BiconnectedComponents failed: %s", ex.what())));
+    }
+
+    CypherResultBuilder b(true);
+    pg.graph.forNodes([&](NetworKit::node u) {
+        const auto &comps = bcc.getComponentsOfNode(u);
+        if (comps.size() <= 1)
+            return;
+
+        NetworKit::Graph without_u(pg.graph);
+        without_u.removeNode(u);
+        NetworKit::ConnectedComponents cc(without_u);
+        try { cc.run(); }
+        catch (const std::exception &ex) {
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                            errmsg("ConnectedComponents failed: %s", ex.what())));
+        }
+
+        auto sizes = cc.getComponentSizes();
+        int32_t comp_count = (int32_t)sizes.size();
+        int32_t comp_min = 0, comp_max = 0;
+        bool first = true;
+        for (const auto &[comp_id, size] : sizes) {
+            (void)comp_id;
+            int32_t sz = (int32_t)size;
+            if (first) { comp_min = comp_max = sz; first = false; }
+            else { comp_min = std::min(comp_min, sz); comp_max = std::max(comp_max, sz); }
+        }
+
+        b.begin_row();
+        b.key("nodeId"); b.add_int64(pg.id_map.resolve(u));
+        b.key("resultingComponentCount"); b.add_int64(comp_count);
+        b.key("resultingComponentMin"); b.add_int64(comp_min);
+        b.key("resultingComponentMax"); b.add_int64(comp_max);
+        b.end_row();
+    });
+    PG_RETURN_DATUM(b.finish());
 }
 
 } /* extern "C" */
