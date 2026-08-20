@@ -37,8 +37,9 @@ Node2Vec biased random-walk embeddings. Returns one row per node with a
   BiasedRandomWalk::preprocessNode()` reads edge weights directly (confirmed
   by reading `networkit/cpp/embedding/BiasedRandomWalk.cpp`), so this behaves
   like every other `relationship_weight_property` parameter in this API (see
-  `docs/architecture.md`'s weight-override section) -- named graphs get a
-  reweighted private copy, anonymous graphs must bake the weight into
+  [docs/architecture.md's "Per-call weight
+  override"](../architecture.md#per-call-weight-override) section) -- named
+  graphs get a reweighted private copy, anonymous graphs must bake the weight into
   `edge_query`'s `AS weight` projection instead. **Known limitation shared
   with every other `relationship_weight_property` parameter, not specific to
   `node2vec_stream`:** if the projection's stored `edge_query` already reads
@@ -65,13 +66,15 @@ real, vendored NetworKit functions `Node2Vec::run()` itself calls internally,
 just re-exposed with configurable `window_size`/`iterations`. This mirrors
 the precedent set by `randomWalk_stream` reaching into
 `networkit/cpp/embedding/` for `BiasedRandomWalk` (see
-`docs/implemented-plans/03-pathfinding-parity.md`).
+[Plan: Path-finding & Flow Algorithm Parity Fixes](../implemented-plans/03-pathfinding-parity.md)).
 
 Excluded, out of scope: `negativeSamplingRate` -- hardcoded inside
 `LearnEmbedding.cpp` ("value taken from original word2vec code"), not
 exposed as a parameter by NetworKit; would require a NetworKit-side change.
-FastRP and GraphSAGE have no NetworKit class (tracked in
-`docs/neo4j-gds-parity-external-libs.md`).
+FastRP has no NetworKit class (tracked in
+[docs/neo4j-gds-parity-external-libs.md's "3. FastRP" section](../neo4j-gds-parity-external-libs.md#3-fastrp-random-projection-node-embeddings)).
+GraphSAGE likewise has no NetworKit class and no dedicated section in that
+file.
 
 See also: [Plan: Embedding algorithm parity fixes](../implemented-plans/05-embeddings-parity.md)
 

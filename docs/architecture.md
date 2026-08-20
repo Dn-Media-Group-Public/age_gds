@@ -192,7 +192,7 @@ To incorporate Cypher mutations: `graph_drop` + `graph_index` (full rebuild).
 `graph_reindex` for live indices only compacts existing files; it does not
 reload from AGE.
 
-See also: [Plan 09: Live Graph Index](../implemented-plans/09-live-graph-index.md)
+See also: [Plan 09: Live Graph Index](implemented-plans/09-live-graph-index.md)
 
 ---
 

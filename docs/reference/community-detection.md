@@ -26,7 +26,7 @@ age_gds.louvain_stream(
 Louvain community detection. Community IDs are arbitrary non-negative
 integers unless `consecutive_ids` is set.
 
-- `relationship_weight_property`: see "Relationship weight override" above.
+- `relationship_weight_property`: see ["Relationship weight override"](README.md#relationship-weight-override-weight_property--relationship_weight_property).
 - `gamma`: `NetworKit::PLM`'s multi-resolution modularity parameter (no
   direct Neo4j GDS equivalent; the natural granularity knob). `1.0` =
   standard modularity, `0.0` = one community, `2m` = singleton communities.
@@ -37,7 +37,8 @@ integers unless `consecutive_ids` is set.
   prior behavior) uses PLM's recursive multilevel coarsening; `false` runs a
   single level only. This is **not** an exact port of `maxLevels` (no
   numeric cap is exposed), just the closest binary approximation NetworKit
-  exposes -- see `docs/architecture.md`.
+  exposes -- see [docs/architecture.md's "Community detection: `recurse`/`iterations`
+  are approximations, not exact ports"](../architecture.md#community-detection-recurseiterations-are-approximations-not-exact-ports).
 - `consecutive_ids`: renumber community ids to a dense `0..k-1` range via
   `NetworKit::Partition::compact()`.
 - `min_community_size`: nodes in a community smaller than this are **omitted
@@ -79,7 +80,7 @@ age_gds.leiden_stream(
 
 Leiden community detection (refinement of Louvain).
 
-- `relationship_weight_property`: see "Relationship weight override" above.
+- `relationship_weight_property`: see ["Relationship weight override"](README.md#relationship-weight-override-weight_property--relationship_weight_property).
 - `gamma`: `NetworKit::ParallelLeiden`'s resolution parameter (direct
   constructor argument).
 - `iterations`: number of full Leiden runs (`ParallelLeiden`'s own
@@ -87,7 +88,9 @@ Leiden community detection (refinement of Louvain).
   NetworKit's own default of 3 to 10**). This is only a loose analogue of
   Neo4j's `maxLevels` -- Neo4j's parameter controls coarsening *depth*
   within a single run, while NetworKit's `iterations` repeats the *entire*
-  algorithm; they are not the same knob. See `docs/architecture.md`.
+  algorithm; they are not the same knob. See
+  [docs/architecture.md's "Community detection: `recurse`/`iterations` are
+  approximations, not exact ports"](../architecture.md#community-detection-recurseiterations-are-approximations-not-exact-ports).
 
 **NetworKit class:** `NetworKit::ParallelLeiden`
 
@@ -125,7 +128,7 @@ age_gds.labelPropagation_stream(
 
 Label propagation community detection.
 
-- `relationship_weight_property`: see "Relationship weight override" above.
+- `relationship_weight_property`: see ["Relationship weight override"](README.md#relationship-weight-override-weight_property--relationship_weight_property).
 - `max_iterations`: maps to `NetworKit::PLP`'s `maxIterations` constructor
   parameter. `NULL` (default) keeps NetworKit's own default (unbounded,
   subject to its internal convergence heuristic) -- unchanged from prior
@@ -184,7 +187,7 @@ age_gds.wcc_stream(
 Weakly connected components. All nodes in the same component share the same
 `componentId`.
 
-- `relationship_weight_property`: see "Relationship weight override" above;
+- `relationship_weight_property`: see ["Relationship weight override"](README.md#relationship-weight-override-weight_property--relationship_weight_property);
   applied *before* the `threshold` filter, so the filter sees the
   overridden weights.
 - `threshold`: builds a private, filtered *copy* of the graph excluding
@@ -339,7 +342,7 @@ triangles through each node. Range [0.0, 1.0].
   `NetworKit::LocalClusteringCoefficient` entirely and computes
   `2 * triangles(u) / (deg(u) * (deg(u) - 1))` directly from a named,
   precomputed per-node triangle-count property (read via the projection's
-  stored `node_query` -- see "Node-property read" above). Nodes with
+  stored `node_query` -- see ["Node-property read"](README.md#node-property-read-seed_property--community_property--triangle_count_property)). Nodes with
   degree < 2 return 0.
 
 **NetworKit class:** `NetworKit::LocalClusteringCoefficient` (unless
@@ -382,8 +385,8 @@ the plan's design doc describes this parameter as conceptually "required" for
 the closable gap it targets, but it is `DEFAULT NULL` here so existing calls
 with no arguments keep working). With `community_property`, evaluates the
 named, precomputed per-node community-label property instead (read via the
-projection's stored `node_query` -- see "Node-property read" above).
-`relationship_weight_property`: see "Relationship weight override" above.
+projection's stored `node_query` -- see ["Node-property read"](README.md#node-property-read-seed_property--community_property--triangle_count_property)).
+`relationship_weight_property`: see ["Relationship weight override"](README.md#relationship-weight-override-weight_property--relationship_weight_property).
 Returns one row.
 
 **NetworKit classes:** `NetworKit::PLM` (unless `community_property` is
@@ -421,7 +424,7 @@ age_gds.conductance_stats(
 Returns the conductance of a 2-partition: cut size over the volume of the
 smaller-volume side. `community_property` is required and must assign every
 node a value of exactly `0` or `1` (read via the projection's stored
-`node_query` -- see "Node-property read" above); any other value, or a
+`node_query` -- see ["Node-property read"](README.md#node-property-read-seed_property--community_property--triangle_count_property)); any other value, or a
 missing value on any node, raises an error rather than being silently
 coerced. `relationship_weight_property`: see "Relationship weight override"
 above. Returns one row.

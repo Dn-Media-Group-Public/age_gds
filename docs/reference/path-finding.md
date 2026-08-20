@@ -53,7 +53,8 @@ building it would require AGE's private, unexported path-builder internals.
 real semantics) — `nodeIds` is then the (possibly reduced) visited-node
 list. This is a **different feature** from the SQL function's
 `target_nodes` (per-target-distance rows via `MultiTargetBFS`, unchanged,
-SQL-only). See `docs/architecture.md`'s "Cypher-callable interface" section
+SQL-only). See [docs/architecture.md's "Cypher-callable interface"
+section](../architecture.md#cypher-callable-interface-srcutilcypher_agtypehcpp)
 for the general calling convention.
 
 ---
@@ -129,7 +130,8 @@ requested target rather than `NetworKit::MultiTargetDijkstra` -- that class
 does not store predecessors/paths (`STSP`'s multi-target constructor
 hardcodes `storePred = false`), which would silently drop the path output
 that is this function's reason for existing. See
-`docs/architecture.md`'s "Path-finding and flow algorithms" section.
+[docs/architecture.md's "Path-finding and flow algorithms"
+section](../architecture.md#path-finding-and-flow-algorithms-srcalgorithmspathfindingcpp).
 
 **NetworKit class:** `NetworKit::Dijkstra`
 
@@ -165,8 +167,10 @@ Single-source shortest paths, intended as delta-stepping SSSP.
 
 **Substitution:** NetworKit has no `DeltaStepping` class. `NetworKit::Dijkstra`
 is used as an equivalent for graphs with non-negative edge weights. Excluded
-from `docs/implemented-plans/03-pathfinding-parity.md` (no `delta` parameter
-to add; tracked in `docs/neo4j-gds-parity-external-libs.md`).
+from [Plan: Path-finding & Flow Algorithm Parity
+Fixes](../implemented-plans/03-pathfinding-parity.md) (no `delta` parameter
+to add; tracked in
+[docs/neo4j-gds-parity-external-libs.md's "2. Delta-stepping SSSP" section](../neo4j-gds-parity-external-libs.md#2-delta-stepping-sssp-low-priority--performance-only)).
 
 **NetworKit class:** `NetworKit::Dijkstra`
 
@@ -341,9 +345,9 @@ probabilities are weighted by edge weight).
 to `NetworKit::Embedding::BiasedRandomWalk` -- the same P/Q-biased walker
 `NetworKit::Node2Vec` (`age_gds.node2vec_stream`) uses internally, chosen
 over the hand-rolled uniform `Aux::Random::choice` this function used
-before. See `docs/architecture.md`'s "Path-finding and flow algorithms"
-section for why this required an extra, non-default NetworKit include
-directory.
+before. See [docs/architecture.md's "Path-finding and flow algorithms"
+section](../architecture.md#path-finding-and-flow-algorithms-srcalgorithmspathfindingcpp)
+for why this required an extra, non-default NetworKit include directory.
 
 **Cypher**
 
@@ -514,15 +518,16 @@ age_gds.maxFlow_stats(
 Maximum flow from `source_node` to `target_node` (or, if `source_nodes`/
 `target_nodes` are given, from any of `source_nodes` to any of
 `target_nodes`, computed via a super-source/super-sink graph augmentation --
-see `docs/architecture.md`). Returns one row with the flow value and
-computation time in milliseconds. Not backward compatible in behavior only
-if the new parameters are used; the plain `source_node`/`target_node` call
-shape is unchanged.
+see [docs/architecture.md's "Shared flow-graph
+transforms"](../architecture.md#shared-flow-graph-transforms-srcalgorithmsflow_commonhcpp)
+section). Returns one row with the flow value and computation time in
+milliseconds. Not backward compatible in behavior only if the new parameters
+are used; the plain `source_node`/`target_node` call shape is unchanged.
 
-`capacity_property` reuses the `relationship_weight_property` mechanism
-(see "Common parameter conventions" above) -- `EdmondsKarp` already treats
-graph weight as capacity, so overriding the weight *is* overriding the
-capacity.
+`capacity_property` reuses the `relationship_weight_property` mechanism (see
+[Common parameter conventions](README.md#common-parameter-conventions)) --
+`EdmondsKarp` already treats graph weight as capacity, so overriding the
+weight *is* overriding the capacity.
 
 `node_capacity_property`, if given, caps each node's total throughput by
 splitting it into an in-node/out-node pair joined by an edge weighted at
@@ -579,7 +584,9 @@ graph's catalog row must have `age_graph`/`edge_query` recorded (re-run
 `graph_project`/`graph_index` otherwise). `node_capacity_property` applies
 the same node-splitting transform as `maxFlow_stats`, adapted to keep cost
 (graph weight) and capacity (a named edge attribute) separate -- see
-`docs/architecture.md`.
+[docs/architecture.md's "Shared flow-graph
+transforms"](../architecture.md#shared-flow-graph-transforms-srcalgorithmsflow_commonhcpp)
+section.
 
 In practice this means `graph_name` (a named/cached projection created with
 `directed => true`), not anonymous execution: `get_or_load_graph()`'s
@@ -673,8 +680,9 @@ weighted path from any source node (no incoming edges) to it. Same
 `TopologicalSort` + linear DP pass as `topologicalSort_stream`'s
 `maxDistance` column, but weighted: `dist[v] = max` over predecessors `u`
 of `dist[u] + weight(u,v)`. `relationship_weight_property`: see
-"Relationship weight override" above. Requires a directed acyclic graph --
-raises an error if the graph is undirected or contains a cycle.
+[Relationship weight override](README.md#relationship-weight-override-weight_property--relationship_weight_property).
+Requires a directed acyclic graph -- raises an error if the graph is
+undirected or contains a cycle.
 
 **NetworKit class:** `NetworKit::TopologicalSort`
 

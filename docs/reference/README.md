@@ -13,16 +13,71 @@ See also: [Plan: Per-Theme Function Reference Docs](../implemented-plans/functio
 
 ## Theme files
 
-- [Projection management](projection-management.md) — `graph_index`, `graph_reindex`, `graph_project`, `graph_drop`, `graph_list`, `graph_exists`, `graph_is_stale`
-- [Session cache](session-cache.md) — `cache_stats`, `cache_load`
-- [Utility](utility.md) — `version`
-- [Centrality](centrality.md) — PageRank, Betweenness, Closeness, Harmonic, Degree, Eigenvector, HITS, ArticleRank, Articulation Points
-- [Community detection](community-detection.md) — Louvain, Leiden, Label Propagation, WCC, SCC, k-Core, Triangle Count, Local Clustering Coefficient, Modularity, Conductance, Clique Counting
-- [Path-finding](path-finding.md) — BFS, Dijkstra, Delta-stepping, Bellman-Ford, DFS, Random Walk, Spanning Tree, All-Pairs SP, A*, Max Flow, Min-Cost Max Flow, Topological Sort, Longest Path, Bridges
-- [Similarity](similarity.md) — Node Similarity, KNN
-- [Link prediction](link-prediction.md) — Adamic-Adar, Common Neighbors, Preferential Attachment, Resource Allocation (stream + scalar forms)
-- [Embeddings](embeddings.md) — Node2Vec
-- [Write-back](write-back.md) — `pageRank_write`, `betweenness_write`
+- [Projection management](projection-management.md) —
+  [`graph_index`](projection-management.md#age_gdsgraph_index),
+  [`graph_reindex`](projection-management.md#age_gdsgraph_reindex),
+  [`graph_project`](projection-management.md#age_gdsgraph_project),
+  [`graph_drop`](projection-management.md#age_gdsgraph_drop),
+  [`graph_list`](projection-management.md#age_gdsgraph_list),
+  [`graph_exists`](projection-management.md#age_gdsgraph_exists),
+  [`graph_is_stale`](projection-management.md#age_gdsgraph_is_stale)
+- [Session cache](session-cache.md) —
+  [`cache_stats`](session-cache.md#age_gdscache_stats),
+  [`cache_load`](session-cache.md#age_gdscache_load)
+- [Utility](utility.md) — [`version`](utility.md#age_gdsversion)
+- [Centrality](centrality.md) —
+  [PageRank](centrality.md#age_gdspagerank_stream),
+  [Betweenness](centrality.md#age_gdsbetweenness_stream),
+  [Closeness](centrality.md#age_gdscloseness_stream),
+  [Harmonic](centrality.md#age_gdsharmoniccentrality_stream),
+  [Degree](centrality.md#age_gdsdegree_stream),
+  [Eigenvector](centrality.md#age_gdseigenvector_stream),
+  [HITS](centrality.md#age_gdshits_stream),
+  [ArticleRank](centrality.md#age_gdsarticlerank_stream),
+  [Articulation Points](centrality.md#age_gdsarticulationpoints_stream)
+- [Community detection](community-detection.md) —
+  [Louvain](community-detection.md#age_gdslouvain_stream),
+  [Leiden](community-detection.md#age_gdsleiden_stream),
+  [Label Propagation](community-detection.md#age_gdslabelpropagation_stream),
+  [WCC](community-detection.md#age_gdswcc_stream),
+  [SCC](community-detection.md#age_gdsscc_stream),
+  [k-Core](community-detection.md#age_gdskcore_stream),
+  [Triangle Count](community-detection.md#age_gdstrianglecount_stream),
+  [Local Clustering Coefficient](community-detection.md#age_gdslocalclusteringcoefficient_stream),
+  [Modularity](community-detection.md#age_gdsmodularity_stats),
+  [Conductance](community-detection.md#age_gdsconductance_stats),
+  [Clique Counting](community-detection.md#age_gdscliquecounting_stats)
+- [Path-finding](path-finding.md) —
+  [BFS](path-finding.md#age_gdsbfs_stream),
+  [Dijkstra](path-finding.md#age_gdsshortestpath_dijkstra_stream) /
+  [all-pairs](path-finding.md#age_gdsallshortestpaths_dijkstra_stream),
+  [Delta-stepping](path-finding.md#age_gdsdeltastepping_stream),
+  [Bellman-Ford](path-finding.md#age_gdsbellmanford_stream) /
+  [stats](path-finding.md#age_gdsbellmanford_stats),
+  [DFS](path-finding.md#age_gdsdfs_stream),
+  [Random Walk](path-finding.md#age_gdsrandomwalk_stream),
+  [Spanning Tree](path-finding.md#age_gdsspanningtree_stream),
+  [All-Pairs SP](path-finding.md#age_gdsallshortestpaths_stream),
+  [A*](path-finding.md#age_gdsshortestpath_astar_stream),
+  [Max Flow](path-finding.md#age_gdsmaxflow_stats),
+  [Min-Cost Max Flow](path-finding.md#age_gdsmincostmaxflow_stats),
+  [Topological Sort](path-finding.md#age_gdstopologicalsort_stream),
+  [Longest Path](path-finding.md#age_gdslongestpath_stream),
+  [Bridges](path-finding.md#age_gdsbridges_stream)
+- [Similarity](similarity.md) —
+  [Node Similarity](similarity.md#age_gdsnodesimilarity_stream),
+  [KNN](similarity.md#age_gdsknn_stream)
+- [Link prediction](link-prediction.md) —
+  [Adamic-Adar](link-prediction.md#age_gdslinkprediction_adamicadar_stream),
+  [Common Neighbors](link-prediction.md#age_gdslinkprediction_commonneighbors_stream),
+  [Preferential Attachment](link-prediction.md#age_gdslinkprediction_preferentialattachment_stream),
+  [Resource Allocation](link-prediction.md#age_gdslinkprediction_resourceallocation_stream)
+  (stream forms), plus their
+  [single-pair scalar forms](link-prediction.md#age_gdslinkprediction_adamicadar--commonneighbors--preferentialattachment--resourceallocation)
+- [Embeddings](embeddings.md) — [Node2Vec](embeddings.md#age_gdsnode2vec_stream)
+- [Write-back](write-back.md) —
+  [`pageRank_write`](write-back.md#age_gdspagerank_write),
+  [`betweenness_write`](write-back.md#age_gdsbetweenness_write)
 
 ## Common parameter conventions
 
@@ -152,9 +207,12 @@ RETURN row.nodeId, row.score
 **Function names are case-sensitive inside `cypher()`** (AGE does not fold
 identifiers) — call any mixed-case function (`shortestPath_dijkstra_stream`,
 `labelPropagation_stream`, `articleRank_stream`, ...) using its all-lowercase
-spelling (`shortestpath_dijkstra_stream`). See `docs/architecture.md`'s
-"Cypher-callable interface" section for the full design and
-`docs/user-guide.md`'s "Calling algorithms from inside Cypher" for worked
+spelling (`shortestpath_dijkstra_stream`). See
+[docs/architecture.md's "Cypher-callable interface"
+section](../architecture.md#cypher-callable-interface-srcutilcypher_agtypehcpp)
+for the full design and
+[docs/user-guide.md's "Calling algorithms from inside Cypher"
+section](../user-guide.md#calling-algorithms-from-inside-cypher) for worked
 examples.
 
 The call shape is `age_gds.<name>(graphName agtype, config agtype DEFAULT

@@ -31,7 +31,8 @@ age_gds.nodeSimilarity_stream(
 
 Similarity for node pairs, computed per source node's **bounded top-K /
 bottom-K neighbor lists** rather than the full `O(n²)` pairwise matrix (see
-`docs/architecture.md`'s "Similarity: bounded top-K/bottom-K heaps"
+[docs/architecture.md's "Similarity: bounded top-K/bottom-K
+heaps"](../architecture.md#similarity-bounded-top-kbottom-k-heaps-srcalgorithmssimilaritycpp)
 section for why). `similarity` is in `[0.0, 1.0]` for `JACCARD`/`OVERLAP`/
 `COSINE`.
 
@@ -72,8 +73,9 @@ section for why). `similarity` is in `[0.0, 1.0]` for `JACCARD`/`OVERLAP`/
   arithmetic over the graph's edge weights, since NetworKit's `JaccardIndex`
   has no weighted variant. Only valid with `similarity_metric = 'JACCARD'`
   (raises an error otherwise); also raises an error if the resulting graph
-  is not weighted (see the common "Relationship weight override" section
-  above -- for anonymous graphs, `relationship_weight_property` is a no-op
+  is not weighted (see the common
+  [Relationship weight override](README.md#relationship-weight-override-weight_property--relationship_weight_property)
+  section -- for anonymous graphs, `relationship_weight_property` is a no-op
   by design, so make sure `edge_query`/`weighted` already produce a
   weighted graph).
 - Any directed input graph is converted to an undirected view first
@@ -131,9 +133,9 @@ This remains a **topology-Jaccard substitution** for Neo4j's actual
 `gds.knn.stream` semantics (K-nearest-neighbors over **node property
 vectors**, not graph topology) -- a genuine NetworKit gap (no
 property-vector / approximate-NN class); see
-`docs/neo4j-gds-parity-external-libs.md` for the adopted-library plan to
-close it (hnswlib), which is a separate, additive function, not a
-modification of this one.
+[docs/neo4j-gds-parity-external-libs.md's "7 / 8 / 9. Vector search" section](../neo4j-gds-parity-external-libs.md#7--8--9-vector-search-property-vector-knn-ann-descent-internals--k-means--hdbscan-over-node-property-vectors)
+for the adopted-library plan to close it (hnswlib), which is a separate,
+additive function, not a modification of this one.
 
 **NetworKit class:** `NetworKit::JaccardIndex`
 
