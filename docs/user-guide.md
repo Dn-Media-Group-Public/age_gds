@@ -352,6 +352,86 @@ WHERE distance IS NOT NULL;  -- only reachable nodes
 
 ---
 
+## Calling algorithms from inside Cypher
+
+Every `age_gds` function above is also callable from *inside* a `cypher()`
+block, not just as plain SQL — as a scalar expression, using `UNWIND`
+instead of Neo4j's `CALL ... YIELD` (AGE's Cypher grammar has no `CALL ...
+YIELD`; `age_gds.<name>(graphName, config)` returns a JSON array or map that
+`UNWIND`/dot-access consumes):
+
+```cypher
+-- SQL equivalent: SELECT * FROM age_gds.pageRank_stream(graph_name => 'social_proj');
+SELECT * FROM cypher('social', $$
+    UNWIND age_gds.pagerank_stream('social_proj', {dampingFactor: 0.85}) AS row
+    RETURN row.nodeId, row.score
+$$) AS ("nodeId" agtype, score agtype)
+ORDER BY (score::text)::float8 DESC;
+```
+
+`*_stream` functions return a JSON array (one map per row) — consume with
+`UNWIND`. `*_stats`/`*_write` functions return a single JSON map directly —
+access fields with dot notation, no `UNWIND`:
+
+```cypher
+SELECT * FROM cypher('social', $$
+    RETURN age_gds.pagerank_stats('social_proj', {}).computeMillis
+$$) AS ("computeMillis" agtype);
+```
+
+Config keys use Neo4j's camelCase config names (`dampingFactor`,
+`maxIterations`, `sourceNode`, `relationshipWeightProperty`, ...), not the
+SQL functions' `snake_case` parameter names — see `docs/api.md`'s
+"Cypher-callable overload" note under each function for its exact key list.
+An unrecognized config key raises an error naming it, matching Neo4j's
+strict config validation.
+
+**Function names are case-sensitive inside `cypher()`.** AGE's Cypher parser
+does not fold identifiers to lowercase the way ordinary SQL does. Any
+function whose SQL name has mixed case —
+`shortestPath_dijkstra_stream`, `allShortestPaths_stream`,
+`labelPropagation_stream`, `articleRank_stream`, and others — **must be
+called with its all-lowercase spelling** inside Cypher
+(`age_gds.shortestpath_dijkstra_stream(...)`), even though the exact same
+mixed-case spelling works fine as plain SQL:
+
+```cypher
+-- Works: all-lowercase.
+SELECT * FROM cypher('social', $$
+    UNWIND age_gds.shortestpath_dijkstra_stream('social_proj',
+        {sourceNode: 12345, targetNode: 12348}) AS row
+    RETURN row.totalCost, row.nodeIds
+$$) AS ("totalCost" agtype, "nodeIds" agtype);
+
+-- Fails: "function age_gds.shortestPath_dijkstra_stream(agtype, agtype) does not exist".
+```
+
+Functions whose SQL name is already all-lowercase (`bfs_stream`,
+`dfs_stream`, `bridges_stream`, `pagerank_stream`, ...) are unaffected.
+
+`graph_project`'s Cypher overload mirrors Neo4j's real
+`gds.graph.project(graphName, nodeProjection, relationshipProjection,
+configuration)` shape instead of the `(graphName, config)` convention used
+everywhere else:
+
+```cypher
+SELECT * FROM cypher('social', $$
+    RETURN age_gds.graph_project('social_proj2', {Person: {}}, '*',
+                                  {ageGraph: 'social'}).graphName
+$$) AS ("graphName" agtype);
+```
+
+`graph_list()`/`cache_stats()` are zero-argument in SQL, so their Cypher
+overload can't share the name (Postgres can't overload two zero-argument
+functions by return type alone) — call `graph_list_cypher()`/
+`cache_stats_cypher()` instead.
+
+See `docs/architecture.md`'s "Cypher-callable interface" section for the
+full design (agtype/jsonb plumbing, the `UNWIND`-instead-of-`YIELD`
+rationale, and why AGE's function-name case sensitivity is the way it is).
+
+---
+
 ## Write-back: persisting scores to AGE
 
 Write-back functions compute an algorithm and write each node's score back to

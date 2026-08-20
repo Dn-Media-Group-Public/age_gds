@@ -9,6 +9,7 @@
 #include "catalog/session_cache.h"
 #include "catalog/index_storage.h"
 #include "bridge/age_loader.h"
+#include "util/cypher_agtype.h"
 
 #include <string>
 #include <stdexcept>
@@ -121,28 +122,14 @@ static void cleanup_bin_xact_cb(XactEvent event, void * /*arg*/)
     }
 }
 
-/* ============================================================ C functions == */
-
-extern "C" {
-
-PG_FUNCTION_INFO_V1(age_gds_graph_project);
-PG_FUNCTION_INFO_V1(age_gds_graph_drop);
-PG_FUNCTION_INFO_V1(age_gds_graph_list);
-PG_FUNCTION_INFO_V1(age_gds_graph_exists);
-PG_FUNCTION_INFO_V1(age_gds_graph_is_stale);
-
-/* --------------------------------------------------- graph_project -------- */
-
-Datum age_gds_graph_project(PG_FUNCTION_ARGS)
+/* Shared core: both age_gds_graph_project (SQL) and
+ * age_gds_graph_project_cypher call this directly after resolving their own
+ * argument shapes (no SPI round-trip between the two wrappers). */
+static void do_graph_project(
+    const char *name_str, const char *age_graph_str,
+    const char *node_query_str, const char *edge_query_str,
+    bool directed, bool weighted, bool incremental)
 {
-    char *name_str       = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    char *age_graph_str  = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    char *node_query_str = text_to_cstring(PG_GETARG_TEXT_PP(2));
-    char *edge_query_str = text_to_cstring(PG_GETARG_TEXT_PP(3));
-    bool  directed       = PG_GETARG_BOOL(4);
-    bool  weighted       = PG_GETARG_BOOL(5);
-    bool  incremental    = PG_GETARG_BOOL(6);
-
     /* Expand data_dir */
     const char *raw_dir = GetConfigOption("age_gds.data_dir", false, false);
     char       *data_dir_str = expand_data_dir(raw_dir);
@@ -240,16 +227,140 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
                  errmsg("graph_project catalog insert failed (SPI code %d)", ret)));
 
     SPI_finish();
+}
 
+/* ============================================================ C functions == */
+
+extern "C" {
+
+PG_FUNCTION_INFO_V1(age_gds_graph_project);
+PG_FUNCTION_INFO_V1(age_gds_graph_drop);
+PG_FUNCTION_INFO_V1(age_gds_graph_list);
+PG_FUNCTION_INFO_V1(age_gds_graph_exists);
+PG_FUNCTION_INFO_V1(age_gds_graph_is_stale);
+
+/* --------------------------------------------------- graph_project -------- */
+
+Datum age_gds_graph_project(PG_FUNCTION_ARGS)
+{
+    char *name_str       = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    char *age_graph_str  = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    char *node_query_str = text_to_cstring(PG_GETARG_TEXT_PP(2));
+    char *edge_query_str = text_to_cstring(PG_GETARG_TEXT_PP(3));
+    bool  directed       = PG_GETARG_BOOL(4);
+    bool  weighted       = PG_GETARG_BOOL(5);
+    bool  incremental    = PG_GETARG_BOOL(6);
+
+    do_graph_project(name_str, age_graph_str, node_query_str, edge_query_str,
+                     directed, weighted, incremental);
     PG_RETURN_VOID();
+}
+
+/* --------------------------------------------------- graph_project (Cypher) */
+/* age_gds.graph_project(graphName agtype, nodeProjection agtype,
+ * relationshipProjection agtype, config agtype DEFAULT NULL) RETURNS agtype.
+ * Matches Neo4j's real gds.graph.project(graphName, nodeProjection,
+ * relationshipProjection, configuration) shape (not the (graphName, config)
+ * 2-arg convention every other wrapper uses -- there is no "graph to select"
+ * here, graphName IS the new projection's name).
+ *
+ * nodeProjection/relationshipProjection: '*' (wildcard) or a map of
+ * label/type -> projection-config map. Only an empty {} projection-config
+ * is supported per label/type; Neo4j's "properties" key is refused as
+ * unsupported (see plan's projection-translation section) rather than
+ * silently ignored. config = {ageGraph (required), directed, weighted,
+ * incremental}. */
+
+static std::string translate_projection(Jsonb *proj, bool is_node, const char *argname)
+{
+    if (jsonb_is_string_eq(proj, "*"))
+        return is_node ? "MATCH (n) RETURN id(n) AS id"
+                       : "MATCH (a)-[r]->(b) RETURN id(a) AS src, id(b) AS dst, r.weight AS weight";
+
+    if (!proj || !JB_ROOT_IS_OBJECT(proj))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s must be '*' or a map of label/type -> {}", argname)));
+
+    std::vector<std::string> labels;
+    JsonbIterator *it = JsonbIteratorInit(&proj->root);
+    JsonbValue key, val;
+    JsonbIteratorToken tok;
+    while ((tok = JsonbIteratorNext(&it, &key, false)) != WJB_DONE) {
+        if (tok != WJB_KEY) continue;
+        std::string label(key.val.string.val, key.val.string.len);
+        JsonbIteratorToken vtok = JsonbIteratorNext(&it, &val, true);
+        if (vtok == WJB_VALUE && val.type == jbvBinary && JsonContainerIsObject(val.val.binary.data)) {
+            JsonbValue found;
+            JsonbValue propkey;
+            propkey.type = jbvString;
+            propkey.val.string.val = (char *)"properties";
+            propkey.val.string.len = 10;
+            if (findJsonbValueFromContainer(val.val.binary.data, JB_FOBJECT, &propkey))
+                ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                errmsg("%s: 'properties' is not supported for label/type \"%s\"",
+                                       argname, label.c_str())));
+        }
+        labels.push_back(label);
+    }
+    if (labels.empty())
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("%s must name at least one label/type", argname)));
+
+    std::string query;
+    for (size_t i = 0; i < labels.size(); i++) {
+        if (i > 0) query += " UNION ";
+        if (is_node)
+            query += "MATCH (n:`" + labels[i] + "`) RETURN id(n) AS id";
+        else
+            query += "MATCH (a)-[r:`" + labels[i] + "`]->(b) "
+                     "RETURN id(a) AS src, id(b) AS dst, r.weight AS weight";
+    }
+    return query;
+}
+
+PG_FUNCTION_INFO_V1(age_gds_graph_project_cypher);
+
+Datum age_gds_graph_project_cypher(PG_FUNCTION_ARGS)
+{
+    if (agtype_arg_is_null(fcinfo, 0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_project: graphName is required")));
+    std::string name = get_agtype_arg_string(fcinfo, 0, "graphName");
+
+    Jsonb *node_proj = agtype_arg_to_jsonb_any(fcinfo, 1);
+    Jsonb *rel_proj  = agtype_arg_to_jsonb_any(fcinfo, 2);
+    if (!node_proj || !rel_proj)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_project: nodeProjection and relationshipProjection are required")));
+
+    CypherConfig cfg = parse_cypher_config(fcinfo, 3);
+    cfg.validate_keys({"ageGraph", "directed", "weighted", "incremental"});
+    std::string age_graph;
+    if (!cfg.get_string("ageGraph", age_graph))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_project: config.ageGraph is required")));
+    bool directed = false, weighted = false, incremental = false;
+    cfg.get_bool("directed", directed);
+    cfg.get_bool("weighted", weighted);
+    cfg.get_bool("incremental", incremental);
+
+    std::string node_query = translate_projection(node_proj, true, "nodeProjection");
+    std::string edge_query = translate_projection(rel_proj, false, "relationshipProjection");
+
+    do_graph_project(name.c_str(), age_graph.c_str(), node_query.c_str(), edge_query.c_str(),
+                     directed, weighted, incremental);
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("graphName"); b.add_string(name);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* --------------------------------------------------- graph_drop ----------- */
 
-Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
+static void do_graph_drop(const char *name_str)
 {
-    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
-
     /* ---- Step 1: look up catalog row ---- */
     char  file_path_buf[MAXPGPATH]  = {0};
     char  nodes_path_buf[MAXPGPATH] = {0};
@@ -369,8 +480,32 @@ Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
 
     /* ---- Step 5: evict from session cache ---- */
     session_cache_invalidate(name_str);
+}
 
+Datum age_gds_graph_drop(PG_FUNCTION_ARGS)
+{
+    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    do_graph_drop(name_str);
     PG_RETURN_VOID();
+}
+
+/* --------------------------------------------------- graph_drop (Cypher) - */
+
+PG_FUNCTION_INFO_V1(age_gds_graph_drop_cypher);
+
+Datum age_gds_graph_drop_cypher(PG_FUNCTION_ARGS)
+{
+    if (agtype_arg_is_null(fcinfo, 0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_drop: graphName is required")));
+    std::string name = get_agtype_arg_string(fcinfo, 0, "graphName");
+    do_graph_drop(name.c_str());
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("graphName"); b.add_string(name);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* --------------------------------------------------- graph_list ----------- */
@@ -445,12 +580,83 @@ Datum age_gds_graph_list(PG_FUNCTION_ARGS)
     return (Datum) 0;
 }
 
+/* --------------------------------------------------- graph_list (Cypher) - */
+/* age_gds.graph_list() takes no arguments in SQL; the Cypher-callable
+ * overload keeps the same (no-arg) shape -- there is no graph to select and
+ * no per-algorithm config. Array of maps, one per catalog row. */
+
+PG_FUNCTION_INFO_V1(age_gds_graph_list_cypher);
+
+Datum age_gds_graph_list_cypher(PG_FUNCTION_ARGS)
+{
+    SPI_connect();
+
+    int ret = SPI_execute(
+        "SELECT name, age_graph, node_count, edge_count, "
+        "       directed, weighted, file_path, created_at, live, incremental "
+        "FROM age_gds.graphs "
+        "ORDER BY created_at",
+        true, 0);
+
+    if (ret != SPI_OK_SELECT) {
+        SPI_finish();
+        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                        errmsg("graph_list query failed (SPI code %d)", ret)));
+    }
+
+    CypherResultBuilder b(true);
+    for (uint64_t i = 0; i < SPI_processed; i++) {
+        HeapTuple spi_tup  = SPI_tuptable->vals[i];
+        TupleDesc spi_desc = SPI_tuptable->tupdesc;
+        bool isnull;
+
+        auto get_text = [&](int col) -> std::string {
+            Datum d = SPI_getbinval(spi_tup, spi_desc, col, &isnull);
+            return isnull ? std::string{} : std::string(TextDatumGetCString(d));
+        };
+        Datum name_d       = SPI_getbinval(spi_tup, spi_desc, 1, &isnull);
+        std::string name   = isnull ? "" : TextDatumGetCString(name_d);
+        std::string age_g  = get_text(2);
+        Datum nc_d = SPI_getbinval(spi_tup, spi_desc, 3, &isnull);
+        int64_t nc = isnull ? 0 : DatumGetInt64(nc_d);
+        Datum ec_d = SPI_getbinval(spi_tup, spi_desc, 4, &isnull);
+        int64_t ec = isnull ? 0 : DatumGetInt64(ec_d);
+        Datum dir_d = SPI_getbinval(spi_tup, spi_desc, 5, &isnull);
+        bool directed = !isnull && DatumGetBool(dir_d);
+        Datum wt_d = SPI_getbinval(spi_tup, spi_desc, 6, &isnull);
+        bool weighted = !isnull && DatumGetBool(wt_d);
+        std::string file_path = get_text(7);
+        Datum ts_d = SPI_getbinval(spi_tup, spi_desc, 8, &isnull);
+        std::string created_at = isnull ? "" :
+            DatumGetCString(DirectFunctionCall1(timestamptz_out, ts_d));
+        Datum live_d = SPI_getbinval(spi_tup, spi_desc, 9, &isnull);
+        bool live = !isnull && DatumGetBool(live_d);
+        Datum inc_d = SPI_getbinval(spi_tup, spi_desc, 10, &isnull);
+        bool incremental = !isnull && DatumGetBool(inc_d);
+
+        b.begin_row();
+        b.key("name"); b.add_string(name);
+        b.key("age_graph"); b.add_string(age_g);
+        b.key("node_count"); b.add_int64(nc);
+        b.key("edge_count"); b.add_int64(ec);
+        b.key("directed"); b.add_bool(directed);
+        b.key("weighted"); b.add_bool(weighted);
+        b.key("file_path"); if (file_path.empty()) b.add_null(); else b.add_string(file_path);
+        b.key("created_at"); if (created_at.empty()) b.add_null(); else b.add_string(created_at);
+        b.key("memoryUsage"); b.add_int64(nc * 8 + ec * 20);
+        b.key("live"); b.add_bool(live);
+        b.key("incremental"); b.add_bool(incremental);
+        b.end_row();
+    }
+
+    SPI_finish();
+    PG_RETURN_DATUM(b.finish());
+}
+
 /* --------------------------------------------------- graph_exists --------- */
 
-Datum age_gds_graph_exists(PG_FUNCTION_ARGS)
+static bool do_graph_exists(const char *name_str)
 {
-    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
-
     SPI_connect();
 
     Oid   argtypes[1] = {TEXTOID};
@@ -468,15 +674,32 @@ Datum age_gds_graph_exists(PG_FUNCTION_ARGS)
     bool found = (SPI_processed > 0);
 
     SPI_finish();
+    return found;
+}
 
-    PG_RETURN_BOOL(found);
+Datum age_gds_graph_exists(PG_FUNCTION_ARGS)
+{
+    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    PG_RETURN_BOOL(do_graph_exists(name_str));
+}
+
+/* --------------------------------------------------- graph_exists (Cypher) */
+
+PG_FUNCTION_INFO_V1(age_gds_graph_exists_cypher);
+
+Datum age_gds_graph_exists_cypher(PG_FUNCTION_ARGS)
+{
+    if (agtype_arg_is_null(fcinfo, 0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_exists: graphName is required")));
+    std::string name = get_agtype_arg_string(fcinfo, 0, "graphName");
+    return bool_to_agtype_scalar(do_graph_exists(name.c_str()));
 }
 
 /* --------------------------------------------------- graph_is_stale ------- */
 
-Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
+static bool do_graph_is_stale(const char *name_str)
 {
-    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char  age_graph_buf[256] = {0};
     bool  is_live            = false;
 
@@ -520,7 +743,7 @@ Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
 
     /* Live indices are never stale */
     if (is_live)
-        PG_RETURN_BOOL(false);
+        return false;
 
     /* === SPI session 2: staleness check via pg_stat_user_tables === */
     bool stale = false;
@@ -550,7 +773,26 @@ Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
 
     SPI_finish();
 
-    PG_RETURN_BOOL(stale);
+    return stale;
+}
+
+Datum age_gds_graph_is_stale(PG_FUNCTION_ARGS)
+{
+    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    PG_RETURN_BOOL(do_graph_is_stale(name_str));
+}
+
+/* --------------------------------------------------- graph_is_stale (Cypher) */
+
+PG_FUNCTION_INFO_V1(age_gds_graph_is_stale_cypher);
+
+Datum age_gds_graph_is_stale_cypher(PG_FUNCTION_ARGS)
+{
+    if (agtype_arg_is_null(fcinfo, 0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_is_stale: graphName is required")));
+    std::string name = get_agtype_arg_string(fcinfo, 0, "graphName");
+    return bool_to_agtype_scalar(do_graph_is_stale(name.c_str()));
 }
 
 } // extern "C"

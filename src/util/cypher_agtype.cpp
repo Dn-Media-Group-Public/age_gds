@@ -73,6 +73,11 @@ Datum double_to_agtype_scalar(double v)
     return agtype_from_cstring(repr);
 }
 
+Datum bool_to_agtype_scalar(bool v)
+{
+    return agtype_from_cstring(v ? "true" : "false");
+}
+
 std::string get_agtype_arg_string(FunctionCallInfo fcinfo, int argno, const char *argname)
 {
     if (PG_ARGISNULL(argno))
@@ -101,6 +106,35 @@ CypherConfig parse_cypher_config(FunctionCallInfo fcinfo, int argno)
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("config must be a map")));
     return cfg;
+}
+
+Jsonb *agtype_arg_to_jsonb_any(FunctionCallInfo fcinfo, int argno)
+{
+    if (PG_ARGISNULL(argno))
+        return nullptr;
+    char *repr = agtype_arg_to_text(fcinfo, argno);
+    if (strcmp(repr, "null") == 0)
+        return nullptr;
+    Datum jsonb_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(repr));
+    return DatumGetJsonbP(jsonb_datum);
+}
+
+bool jsonb_is_string_eq(Jsonb *jb, const char *s)
+{
+    if (!jb || !JB_ROOT_IS_SCALAR(jb))
+        return false;
+    /* Scalars are internally represented as a 1-element array with the
+     * scalar flag set: the iterator yields WJB_BEGIN_ARRAY before the
+     * WJB_ELEM holding the actual value. */
+    JsonbIterator *it = JsonbIteratorInit(&jb->root);
+    JsonbValue val;
+    JsonbIteratorToken tok = JsonbIteratorNext(&it, &val, false);
+    if (tok == WJB_BEGIN_ARRAY)
+        tok = JsonbIteratorNext(&it, &val, false);
+    if (tok != WJB_ELEM || val.type != jbvString)
+        return false;
+    return (size_t)val.val.string.len == strlen(s) &&
+           strncmp(val.val.string.val, s, val.val.string.len) == 0;
 }
 
 static bool find_key(Jsonb *jb, const char *key, JsonbValue &out)

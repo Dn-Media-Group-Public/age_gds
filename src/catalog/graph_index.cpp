@@ -13,6 +13,7 @@
 #include "catalog/session_cache.h"
 #include "bridge/age_loader.h"
 #include "util/pair_hash.h"
+#include "util/cypher_agtype.h"
 
 #include <string>
 #include <cstring>
@@ -519,19 +520,8 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
 
 /* --------------------------------------------------- graph_reindex -------- */
 
-Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
+static void do_graph_reindex(const char *name_str, bool force_is_null, bool force_val)
 {
-    if (PG_ARGISNULL(0))
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("graph_reindex: name must not be NULL")));
-
-    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
-
-    /* force: NULL = mode-appropriate default */
-    bool force_is_null = PG_ARGISNULL(1);
-    bool force_val     = force_is_null ? false : PG_GETARG_BOOL(1);
-
     /* Look up catalog */
     char  nodes_path[MAXPGPATH] = {0};
     char  edges_path[MAXPGPATH] = {0};
@@ -745,8 +735,48 @@ Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
 
         session_cache_invalidate(name_str);
     }
+}
 
+Datum age_gds_graph_reindex(PG_FUNCTION_ARGS)
+{
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("graph_reindex: name must not be NULL")));
+
+    char *name_str = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    bool force_is_null = PG_ARGISNULL(1);
+    bool force_val     = force_is_null ? false : PG_GETARG_BOOL(1);
+
+    do_graph_reindex(name_str, force_is_null, force_val);
     PG_RETURN_VOID();
+}
+
+/* --------------------------------------------------- graph_reindex (Cypher) */
+/* age_gds.graph_reindex(graphName agtype, config agtype DEFAULT NULL);
+ * config = {force}. */
+
+PG_FUNCTION_INFO_V1(age_gds_graph_reindex_cypher);
+
+Datum age_gds_graph_reindex_cypher(PG_FUNCTION_ARGS)
+{
+    if (agtype_arg_is_null(fcinfo, 0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph_reindex: graphName is required")));
+    std::string name = get_agtype_arg_string(fcinfo, 0, "graphName");
+
+    CypherConfig cfg = parse_cypher_config(fcinfo, 1);
+    cfg.validate_keys({"force"});
+    bool force_val = false;
+    bool force_is_null = !cfg.get_bool("force", force_val);
+
+    do_graph_reindex(name.c_str(), force_is_null, force_val);
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("graphName"); b.add_string(name);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
 }
 
 /* ============================================================ triggers ==== */

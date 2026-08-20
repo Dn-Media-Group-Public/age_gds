@@ -66,6 +66,22 @@ CREATE FUNCTION age_gds.graph_project(
     AS 'age_gds', 'age_gds_graph_project'
     LANGUAGE C;
 
+-- Cypher-callable overload: matches Neo4j's real
+-- gds.graph.project(graphName, nodeProjection, relationshipProjection,
+-- configuration) shape (not the (graphName, config) 2-arg convention used
+-- elsewhere -- there is no graph to select here, graphName IS the new
+-- projection's name). nodeProjection/relationshipProjection: '*' or a map
+-- of label/type -> {} ('properties' unsupported, errors naming it).
+-- config = {ageGraph (required), directed, weighted, incremental}.
+CREATE FUNCTION age_gds.graph_project(
+    "graphName"              ag_catalog.agtype,
+    "nodeProjection"         ag_catalog.agtype,
+    "relationshipProjection" ag_catalog.agtype,
+    config                   ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_graph_project_cypher'
+    LANGUAGE C;
+
 -- -------------------------------------------------------------------------
 -- Live index functions
 -- -------------------------------------------------------------------------
@@ -88,6 +104,12 @@ CREATE FUNCTION age_gds.graph_drop(name text)
     AS 'age_gds', 'age_gds_graph_drop'
     LANGUAGE C STRICT;
 
+-- Cypher-callable overload: single map {graphName}.
+CREATE FUNCTION age_gds.graph_drop("graphName" ag_catalog.agtype)
+    RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_graph_drop_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.graph_list()
     RETURNS TABLE(
         name          text,
@@ -105,16 +127,37 @@ CREATE FUNCTION age_gds.graph_list()
     AS 'age_gds', 'age_gds_graph_list'
     LANGUAGE C;
 
+-- Cypher-callable overload: no arguments (no graph to select). Array of
+-- maps, one per catalog row.
+CREATE FUNCTION age_gds.graph_list_cypher()
+    RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_graph_list_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.graph_exists(name text)
     RETURNS boolean
     AS 'age_gds', 'age_gds_graph_exists'
     LANGUAGE C STRICT;
+
+-- Cypher-callable overload: bare scalar agtype boolean.
+CREATE FUNCTION age_gds.graph_exists("graphName" ag_catalog.agtype)
+    RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_graph_exists_cypher'
+    LANGUAGE C;
 
 CREATE FUNCTION age_gds.graph_reindex(
     name  text,
     force boolean DEFAULT NULL
 ) RETURNS void
     AS 'age_gds', 'age_gds_graph_reindex'
+    LANGUAGE C;
+
+-- Cypher-callable overload: config = {force}.
+CREATE FUNCTION age_gds.graph_reindex(
+    "graphName" ag_catalog.agtype,
+    config      ag_catalog.agtype DEFAULT NULL
+) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_graph_reindex_cypher'
     LANGUAGE C;
 
 -- -------------------------------------------------------------------------
@@ -126,10 +169,23 @@ CREATE FUNCTION age_gds.cache_stats()
     AS 'age_gds', 'age_gds_cache_stats'
     LANGUAGE C;
 
+-- Cypher-callable overload: no arguments. Single map
+-- {entryCount, totalBytes, limitBytes}.
+CREATE FUNCTION age_gds.cache_stats_cypher()
+    RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_cache_stats_cypher'
+    LANGUAGE C;
+
 CREATE FUNCTION age_gds.cache_load(graph_name text)
     RETURNS void
     AS 'age_gds', 'age_gds_cache_load'
     LANGUAGE C STRICT;
+
+-- Cypher-callable overload: single map {graphName}.
+CREATE FUNCTION age_gds.cache_load("graphName" ag_catalog.agtype)
+    RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_cache_load_cypher'
+    LANGUAGE C;
 
 -- -------------------------------------------------------------------------
 -- Internal trigger functions (live index maintenance)
@@ -1264,3 +1320,9 @@ CREATE FUNCTION age_gds.graph_is_stale(name text)
     RETURNS boolean
     AS 'age_gds', 'age_gds_graph_is_stale'
     LANGUAGE C STRICT;
+
+-- Cypher-callable overload: bare scalar agtype boolean.
+CREATE FUNCTION age_gds.graph_is_stale("graphName" ag_catalog.agtype)
+    RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_graph_is_stale_cypher'
+    LANGUAGE C;

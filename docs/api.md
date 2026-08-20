@@ -112,6 +112,102 @@ always non-NULL.
 
 ---
 
+## Cypher-callable overloads
+
+Every function documented below (except internal trigger functions) also
+has an `(agtype, agtype)` overload usable as a scalar expression inside a
+`cypher()` block — AGE's grammar has no `CALL ... YIELD`, so consume
+`*_stream` results with `UNWIND` and `*_stats`/`*_write` results (single
+maps) with plain dot access:
+
+```cypher
+UNWIND age_gds.pagerank_stream('proj', {dampingFactor: 0.85}) AS row
+RETURN row.nodeId, row.score
+```
+
+**Function names are case-sensitive inside `cypher()`** (AGE does not fold
+identifiers) — call any mixed-case function (`shortestPath_dijkstra_stream`,
+`labelPropagation_stream`, `articleRank_stream`, ...) using its all-lowercase
+spelling (`shortestpath_dijkstra_stream`). See `docs/architecture.md`'s
+"Cypher-callable interface" section for the full design and
+`docs/user-guide.md`'s "Calling algorithms from inside Cypher" for worked
+examples.
+
+The call shape is `age_gds.<name>(graphName agtype, config agtype DEFAULT
+NULL)` for every function except:
+- `graph_project`: `(graphName, nodeProjection, relationshipProjection,
+  config)`, matching Neo4j's real 4-argument shape (see §1).
+- `graph_list`/`cache_stats`: zero-argument in SQL, so the agtype overload
+  is a differently-named function, `graph_list_cypher()`/
+  `cache_stats_cypher()` (Postgres can't overload two zero-arg functions by
+  return type alone).
+
+`config` keys are Neo4j's camelCase config names, not the SQL functions'
+`snake_case` parameter names. Below: config keys and output shape per
+function, grouped the same as the sections that follow. `agtype` scalar
+config values (strings, numbers, booleans, arrays) map directly from
+Cypher's map-literal syntax, e.g. `{sourceNode: 12345, maxDepth: 3,
+targetNodes: [1,2,3]}`.
+
+| Function | Config keys | Output |
+|---|---|---|
+| `graph_project` | see above; `ageGraph` (required), `directed`, `weighted`, `incremental` | map `{graphName}` |
+| `graph_drop` | (none; single `graphName` arg) | map `{graphName}` |
+| `graph_list_cypher` | (no args) | array of catalog rows |
+| `graph_exists` | (none; single `graphName` arg) | bare boolean |
+| `graph_is_stale` | (none; single `graphName` arg) | bare boolean |
+| `graph_reindex` | `force` | map `{graphName}` |
+| `cache_stats_cypher` | (no args) | map `{entryCount, totalBytes, limitBytes}` |
+| `cache_load` | (none; single `graphName` arg) | map `{graphName}` |
+| `pageRank_stream` | `dampingFactor, maxIterations, tolerance, relationshipWeightProperty, scaler` | array of `{nodeId, score}` |
+| `pageRank_stats` | same as `pageRank_stream` | map `{ranIterations, didConverge, computeMillis, minScore, maxScore, meanScore}` |
+| `pageRank_write` | `writeProperty, dampingFactor, maxIterations, tolerance` | map `{nodePropertiesWritten}` |
+| `betweenness_stream` | `samplingSize, samplingSeed, relationshipWeightProperty` | array of `{nodeId, score}` |
+| `betweenness_write` | `writeProperty` | map `{nodePropertiesWritten}` |
+| `closeness_stream` | `useWassermanFaust` | array of `{nodeId, score}` |
+| `harmonicCentrality_stream` | (none) | array of `{nodeId, score}` |
+| `degree_stream` | `orientation, relationshipWeightProperty` | array of `{nodeId, score}` |
+| `eigenvector_stream` | `tolerance, relationshipWeightProperty, scaler` | array of `{nodeId, score}` |
+| `hits_stream` | (none) | array of `{nodeId, auth, hub}` |
+| `articleRank_stream` | `dampingFactor, tolerance, relationshipWeightProperty, scaler` | array of `{nodeId, score}` |
+| `articulationPoints_stream` | (none) | array of `{nodeId, resultingComponentCount, resultingComponentMin, resultingComponentMax}` |
+| `louvain_stream` | `relationshipWeightProperty, gamma, maxIterations, recurse, consecutiveIds, minCommunitySize` | array of `{nodeId, communityId}` |
+| `leiden_stream` | `relationshipWeightProperty, gamma, iterations` | array of `{nodeId, communityId}` |
+| `labelPropagation_stream` | `relationshipWeightProperty, maxIterations, seedProperty (refused), consecutiveIds` | array of `{nodeId, communityId}` |
+| `wcc_stream` | `relationshipWeightProperty, threshold, consecutiveIds` | array of `{nodeId, componentId}` |
+| `scc_stream` | `consecutiveIds` | array of `{nodeId, componentId}` |
+| `kCore_stream` | (none) | array of `{nodeId, coreNumber}` |
+| `triangleCount_stream` | `maxDegree` | array of `{nodeId, triangleCount}` |
+| `localClusteringCoefficient_stream` | `triangleCountProperty` | array of `{nodeId, coefficient}` |
+| `modularity_stats` | `communityProperty, relationshipWeightProperty` | map `{modularity}` |
+| `conductance_stats` | `communityProperty` (required), `relationshipWeightProperty` | map `{conductance}` |
+| `cliqueCounting_stats` | (none) | array of `{cliqueSize, count}` (despite the name — see §5) |
+| `bfs_stream` | see dedicated note above | array with 1 element `{sourceNode, nodeIds}` |
+| `shortestPath_dijkstra_stream` | `sourceNode, targetNode, relationshipWeightProperty` | array with 1 element `{totalCost, nodeIds, costs}` |
+| `allShortestPaths_dijkstra_stream` | `sourceNode, relationshipWeightProperty, targetNodes` | array of `{targetNodeId, totalCost, nodeIds, costs}` |
+| `deltaStepping_stream` | `sourceNode` | array of `{nodeId, distance}` |
+| `bellmanFord_stream` | `sourceNode, relationshipWeightProperty` | array of `{nodeId, distance, isNegativeCycle}` |
+| `bellmanFord_stats` | same as `bellmanFord_stream` | map `{containsNegativeCycle, computeMillis}` |
+| `dfs_stream` | `sourceNode, maxDepth, targetNodes` | array of `{nodeId, depth}` |
+| `randomWalk_stream` | `sourceNodes, walkLength, walksPerNode, inOutFactor, returnFactor, relationshipWeightProperty` | array of `{walkId, nodeId}` |
+| `spanningTree_stream` | `objective, relationshipWeightProperty, sourceNode` | array of `{src, dst, cost}` |
+| `allShortestPaths_stream` | `relationshipWeightProperty` | array of `{sourceNodeId, targetNodeId, distance}` |
+| `maxFlow_stats` | `sourceNode, targetNode, capacityProperty, sourceNodes, targetNodes, nodeCapacityProperty` | map `{flow, computeMillis}` |
+| `shortestPath_astar_stream` | `sourceNode, targetNode, latitudeProperty, longitudeProperty, relationshipWeightProperty` | array with 1 element `{totalCost, nodeIds, costs}` |
+| `minCostMaxFlow_stats` | `capacityProperty, costProperty, sourceNodes, targetNodes, nodeCapacityProperty` | map `{totalCost, computeMillis}` |
+| `topologicalSort_stream` | `computeMaxDistanceFromSource` | array of `{nodeId, sortIndex, maxDistance}` |
+| `longestPath_stream` | `relationshipWeightProperty` | array of `{nodeId, distance}` |
+| `bridges_stream` | (none) | array of `{src, dst}` |
+| `nodeSimilarity_stream` | `similarityCutoff, degreeCutoff, topK, topN, relationshipWeightProperty, upperDegreeCutoff, bottomK, bottomN, sourceNodeFilter, targetNodeFilter, useComponents, similarityMetric` | array of `{node1, node2, similarity}` |
+| `knn_stream` | `topK, similarityCutoff` | array of `{sourceNodeId, targetNodeId, similarity, rank}` |
+| `linkprediction_*_stream` (4) | (none) | array of `{node1, node2, score}` |
+| `linkprediction_*` single-pair (4) | `(node1 agtype, node2 agtype, graphName agtype, config)`; config = `{relationshipQuery, direction}` | bare number |
+| `node2vec_stream` | `embeddingDim, walkLength, walksPerNode, p, q, relationshipWeightProperty, windowSize, iterations` | array of `{nodeId, embedding}` |
+
+See also: [Plan: Cypher-Callable Interface](implemented-plans/cypher-callable-interface.md)
+
+---
+
 ## 1. Projection management
 
 ### `age_gds.graph_index`
@@ -1126,6 +1222,21 @@ once every target has been found rather than visiting the whole graph.
 
 **NetworKit classes:** `NetworKit::Traversal::BFSfrom` (no `target_nodes`),
 `NetworKit::MultiTargetBFS` (`target_nodes` given)
+
+**Cypher-callable overload:**
+`age_gds.bfs_stream(graphName agtype, config agtype)` — config =
+`{sourceNode, maxDepth, targetNodes}` — returns a JSON array with **one**
+element: `{sourceNode, nodeIds}`, matching Neo4j's `gds.bfs.stream` shape.
+**No `path` field**: Neo4j's `path` is a linear chain over `nodeIds` using
+fabricated, non-graph `NEXT` relationships (no real edge, type, or
+properties) — it carries zero information beyond `nodeIds` itself, and
+building it would require AGE's private, unexported path-builder internals.
+`config.targetNodes` here means "stop once every target is visited" (Neo4j's
+real semantics) — `nodeIds` is then the (possibly reduced) visited-node
+list. This is a **different feature** from the SQL function's
+`target_nodes` (per-target-distance rows via `MultiTargetBFS`, unchanged,
+SQL-only). See `docs/architecture.md`'s "Cypher-callable interface" section
+for the general calling convention.
 
 ---
 

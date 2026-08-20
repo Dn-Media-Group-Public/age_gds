@@ -810,6 +810,120 @@ See also: [Plan: Similarity & Link-Prediction Parity Fixes](implemented-plans/04
 
 ---
 
+## Cypher-callable interface (`src/util/cypher_agtype.{h,cpp}`)
+
+Every `age_gds` function historically was callable only as plain SQL
+(`SELECT * FROM age_gds.pageRank_stream(...)`), never from inside an AGE
+`cypher()` block. Each function now also has an `(agtype, agtype)` overload,
+resolved by PostgreSQL's normal function-overloading rules (arity/argument
+types), so `age_gds.pageRank_stream` (and every other wrapper) has two
+independent implementations under the same SQL name: the original typed
+SQL signature, unchanged, and the new `(graphName agtype, config agtype
+DEFAULT NULL)` signature.
+
+### Why `UNWIND` instead of `CALL ... YIELD`
+
+AGE's Cypher grammar has no `CALL ... YIELD` clause (that is Neo4j's own
+procedure framework, not part of core openCypher). A Cypher-callable
+function can only appear as a **scalar expression** — it takes `agtype`
+arguments and returns one `agtype` value; there is no mechanism for a single
+call to fan out into multiple named output columns. The closest equivalent:
+
+```cypher
+-- Neo4j:      CALL gds.pageRank.stream('proj', {dampingFactor: 0.85})
+--             YIELD nodeId, score RETURN nodeId, score
+-- age_gds:
+UNWIND age_gds.pageRank_stream('proj', {dampingFactor: 0.85}) AS row
+RETURN row.nodeId, row.score
+```
+
+`*_stream` wrappers return a JSON array (one map per row) — iterate it with
+`UNWIND`. `*_stats`/`*_write` wrappers return a single JSON map directly —
+access fields with plain dot notation, no `UNWIND` (a bare map is not a
+collection; `UNWIND` on one raises "cannot extract elements from an
+object"). `graph_project`'s call shape is the one exception: it mirrors
+Neo4j's real `gds.graph.project(graphName, nodeProjection,
+relationshipProjection, configuration)` 4-argument shape rather than the
+`(graphName, config)` 2-argument convention, since there is no "graph to
+select" for a projection call. `graph_list`/`cache_stats` (zero-argument in
+SQL) expose their Cypher overload under `graph_list_cypher()`/
+`cache_stats_cypher()` instead — Postgres cannot overload two zero-argument
+functions that differ only in return type.
+
+### Function-name case sensitivity (AGE-specific, not standard SQL)
+
+**AGE's Cypher parser resolves function names case-sensitively and does not
+fold identifiers to lowercase**, unlike ordinary PostgreSQL SQL parsing.
+`age_gds.shortestPath_dijkstra_stream(...)` written with that exact case
+inside a `cypher()` block raises `function ... does not exist`, even though
+the identical spelling works perfectly as plain SQL and the underlying
+catalog function name is (like any unquoted SQL identifier) folded to
+lowercase at `CREATE FUNCTION` time. **Every mixed-case function must be
+called with its all-lowercase spelling inside Cypher** —
+`age_gds.shortestpath_dijkstra_stream(...)`, not
+`age_gds.shortestPath_dijkstra_stream(...)`. This was discovered empirically
+while writing `test/sql/17-cypher-callable-pathfinding.sql`; functions whose
+SQL name is already all-lowercase (`bfs_stream`, `dfs_stream`,
+`bridges_stream`, ...) are unaffected.
+
+### agtype ↔ jsonb ↔ text plumbing — no new hand-rolled parser
+
+Confirmed via the sibling `age_sql` project (`age_sql/src/regexp.c`): most of
+AGE's internal `agtype` API (iterators, structured field access,
+`_agtype_build_*`) is **not exported** from `age.so`. Only `agtype_in`/
+`agtype_out` are safe to call directly (Postgres's own fmgr dispatch depends
+on their signatures staying stable). `src/util/cypher_agtype.cpp` uses
+exactly this pair via `DirectFunctionCall`, treating agtype content as JSON
+text, and does the actual structured parsing/building with PostgreSQL's
+**core** `utils/jsonb.h` API (`Jsonb`, `JsonbIterator`, `pushJsonbValue`,
+etc. — not AGE, not a new dependency), the same approach
+`src/util/config_parser.cpp` already used for PageRank's `config jsonb`
+parameter:
+
+- **Read config**: `agtype_out(arg)` → text → `jsonb_in(text)` (all via
+  `DirectFunctionCall`, all core/AGE-stable functions) → walk the resulting
+  `Jsonb*` with `JsonbIterator`/`findJsonbValueFromContainer` to pull typed
+  fields (`CypherConfig::get_string`/`get_double`/`get_int64_array`/...),
+  erroring on unrecognized top-level keys (`CypherConfig::validate_keys`) —
+  matches Neo4j's strict config validation.
+- **Build result**: `CypherResultBuilder` wraps a `JsonbParseState`/
+  `pushJsonbValue` tree (array-of-maps or a single map) → `JsonbValueToJsonb`
+  → `JsonbToCString` → text → `agtype_in` → return.
+- **Bare scalars**: the four single-pair `linkprediction_*` functions and
+  `graph_exists`/`graph_is_stale` are already scalar in SQL (`RETURNS
+  float8`/`boolean`) — their Cypher overloads return a bare agtype number/
+  boolean (`double_to_agtype_scalar`/`bool_to_agtype_scalar`), no array/map
+  packing.
+
+### Implementation pattern per function
+
+Each function's existing "core" — everything after argument resolution,
+before the SRF emit loop — was extracted into a shared internal function
+(e.g. `bridges_core`, `run_node_similarity`, `do_graph_project`) returning
+an in-memory result. Two thin wrappers call it: the existing SQL SRF entry
+point (unchanged behavior/signature, now delegating to the extracted core)
+and the new agtype entry point (parse `config` → call core → pack result via
+`CypherResultBuilder`). No SPI round-trips between the two wrappers — both
+call the same C++ function directly.
+
+### Build
+
+`age_gds.so` links against `age.so` (`CMakeLists.txt`'s `-l:age.so` via
+`target_link_directories`/`target_link_libraries` — AGE's PostgreSQL module
+has no `lib` prefix, so `find_library`'s `lib*` convention and a plain
+absolute-path link both fail; see the CMakeLists.txt comment for why).
+`age_gds.so` also needs `INSTALL_RPATH` set explicitly to `PG_PKGLIBDIR`:
+CMake clears `RPATH` on install by default, and without it `CREATE
+EXTENSION age_gds`'s `dlopen()` can't resolve the `age.so` `DT_NEEDED` entry
+even though `age.so` is already resident (loaded via `sql/age_gds--1.0.sql`'s
+`LOAD '$libdir/age';` line, required so symbol validation against `age.so`
+succeeds at `CREATE FUNCTION` time). `age_gds.control` declares `requires =
+'age'`.
+
+See also: [Plan: Cypher-Callable Interface](implemented-plans/cypher-callable-interface.md)
+
+---
+
 ## NetworKit integration constraints
 
 ### ERROR macro clash

@@ -20,3 +20,4 @@ Listed in implementation order.
 - [Plan: Similarity & Link-Prediction Parity Fixes](04-similarity-linkprediction-parity.md)
 - [Plan: Embedding Algorithm Parity Fixes](05-embeddings-parity.md)
 - [Plan: New Graph-Theoretic Procedures](06-new-graph-procedures.md)
+- [Plan: Cypher-Callable Interface](cypher-callable-interface.md)

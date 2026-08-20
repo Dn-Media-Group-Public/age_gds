@@ -480,6 +480,25 @@ Datum age_gds_cache_load(PG_FUNCTION_ARGS)
     PG_RETURN_VOID();
 }
 
+/* --------------------------------------------------- cache_load (Cypher) - */
+
+PG_FUNCTION_INFO_V1(age_gds_cache_load_cypher);
+
+Datum age_gds_cache_load_cypher(PG_FUNCTION_ARGS)
+{
+    if (agtype_arg_is_null(fcinfo, 0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("cache_load: graphName is required")));
+    std::string name = get_agtype_arg_string(fcinfo, 0, "graphName");
+    session_cache_get(name.c_str());
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("graphName"); b.add_string(name);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
+}
+
 Datum age_gds_cache_stats(PG_FUNCTION_ARGS)
 {
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -501,6 +520,24 @@ Datum age_gds_cache_stats(PG_FUNCTION_ARGS)
     tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 
     return (Datum) 0;
+}
+
+/* --------------------------------------------------- cache_stats (Cypher) */
+/* No arguments -- there is no graph to select, and no per-algorithm config. */
+
+PG_FUNCTION_INFO_V1(age_gds_cache_stats_cypher);
+
+Datum age_gds_cache_stats_cypher(PG_FUNCTION_ARGS)
+{
+    CacheStats stats = session_cache_stats();
+
+    CypherResultBuilder b(false);
+    b.begin_row();
+    b.key("entryCount"); b.add_int64(stats.entry_count);
+    b.key("totalBytes"); b.add_int64(stats.total_bytes);
+    b.key("limitBytes"); b.add_int64(stats.limit_bytes);
+    b.end_row();
+    PG_RETURN_DATUM(b.finish());
 }
 
 } /* extern "C" */

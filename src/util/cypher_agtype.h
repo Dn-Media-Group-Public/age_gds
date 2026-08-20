@@ -50,6 +50,15 @@ struct CypherConfig {
 // NULL.
 CypherConfig parse_cypher_config(FunctionCallInfo fcinfo, int argno);
 
+// Parse any agtype argument (arg index `argno`) into a Jsonb*, without
+// requiring it to be a map (used for nodeProjection/relationshipProjection,
+// which may be the string '*' or a map of label -> projection-config).
+// Returns nullptr if the arg is SQL NULL.
+Jsonb *agtype_arg_to_jsonb_any(FunctionCallInfo fcinfo, int argno);
+
+// True if `jb` is a JSON string equal to `s` (case-sensitive).
+bool jsonb_is_string_eq(Jsonb *jb, const char *s);
+
 // Extract a plain C string from a string-typed agtype argument (arg
 // index `argno`). Errors if NULL or not a string.
 std::string get_agtype_arg_string(FunctionCallInfo fcinfo, int argno, const char *argname);
@@ -62,6 +71,9 @@ bool agtype_arg_is_null(FunctionCallInfo fcinfo, int argno);
 // (RETURNS float8 in SQL) and need no array/map packing for their Cypher
 // overload -- see plan phase 5.
 Datum double_to_agtype_scalar(double v);
+
+// Same as double_to_agtype_scalar(), for bool (graph_exists, graph_is_stale).
+Datum bool_to_agtype_scalar(bool v);
 
 // --- Result building: JSON array-of-maps (*_stream) or single map
 // (*_stats/*_write), converted to an agtype Datum. ---
