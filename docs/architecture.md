@@ -539,7 +539,8 @@ it — **do not treat them as exact ports**:
 Both defaults were also changed from the underlying NetworKit class's own
 constructor default (`PLM`'s `maxIter` default is 32, not 10;
 `ParallelLeiden`'s `iterations` default is 3, not 10) to the values this
-plan settled on — see `docs/api.md` §5 for each function's exact wording.
+plan settled on — see `docs/reference/community-detection.md` for each
+function's exact wording.
 
 ---
 

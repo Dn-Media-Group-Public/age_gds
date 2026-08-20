@@ -381,8 +381,8 @@ $$) AS ("computeMillis" agtype);
 
 Config keys use Neo4j's camelCase config names (`dampingFactor`,
 `maxIterations`, `sourceNode`, `relationshipWeightProperty`, ...), not the
-SQL functions' `snake_case` parameter names — see `docs/api.md`'s
-"Cypher-callable overload" note under each function for its exact key list.
+SQL functions' `snake_case` parameter names — see each function's entry in
+`docs/reference/` for its exact key list.
 An unrecognized config key raises an error naming it, matching Neo4j's
 strict config validation.
 

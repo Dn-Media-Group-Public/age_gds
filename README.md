@@ -100,5 +100,5 @@ SELECT age_gds.version();   -- '0.1.0'
 ## Documentation
 
 - [User Guide](docs/user-guide.md) — installation, both execution modes, all algorithm categories, write-back, GUC settings, error reference, worked examples
-- [SQL API Reference](docs/api.md) — full signature and parameter description for every SQL function
+- [Function Reference](docs/reference/README.md) — full signature and parameter description for every SQL and Cypher function
 - [Architecture](docs/architecture.md) — data flow, binary file format, session cache internals, NetworKit integration constraints, build system notes
