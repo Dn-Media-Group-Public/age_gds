@@ -214,6 +214,13 @@ static void sssp_path_and_costs(const SSSPAlgo &algo, NetworKit::node target,
 
 extern "C" {
 
+/* Thrown from inside a NetworKit::Traversal::BFSfrom handle to abort the
+ * traversal early once nothing further needs visiting (all targets found,
+ * or -- since BFS visits nodes in non-decreasing depth order -- once depth
+ * exceeds max_depth, meaning every remaining queued node is too deep too).
+ * Shared by age_gds_bfs_stream and age_gds_bfs_stream_cypher. */
+struct BfsStopException {};
+
 PG_FUNCTION_INFO_V1(age_gds_bfs_stream);
 PG_FUNCTION_INFO_V1(age_gds_shortestpath_dijkstra_stream);
 PG_FUNCTION_INFO_V1(age_gds_allshortestpaths_dijkstra_stream);
@@ -309,21 +316,34 @@ Datum age_gds_bfs_stream(PG_FUNCTION_ARGS)
         }
     } else {
         /* No target list: plain BFS over the whole graph via NetworKit's
-         * Traversal::BFSfrom (distance-aware node visitor), with max_depth
-         * enforced as a post-visit guard on which nodes get emitted. */
-        std::vector<int64_t> dist(pg.graph.upperNodeIdBound(), -1);
-        NetworKit::Traversal::BFSfrom(pg.graph, src,
-            [&](NetworKit::node u, NetworKit::count d) {
-                if (max_depth < 0 || (int64_t)d <= max_depth)
-                    dist[u] = (int64_t)d;
-            });
+         * Traversal::BFSfrom, bounded by max_depth via early termination
+         * (BFS visits nodes in non-decreasing depth order, so once d
+         * exceeds max_depth every node still queued is too deep as well --
+         * see BfsStopException's comment) and emitting only nodes actually
+         * visited, rather than every node in the graph.
+         *
+         * BREAKING CHANGE (per docs/implemented-plans/bfs-stream-depth-bound-and-sparse-emit.md):
+         * previously emitted one row per graph node, with `distance` NULL
+         * for unreached nodes; now only reached nodes are emitted and
+         * `distance` is never NULL. */
+        std::vector<std::pair<NetworKit::node, int64_t>> visited;
+        try {
+            NetworKit::Traversal::BFSfrom(pg.graph, src,
+                [&](NetworKit::node u, NetworKit::count d) {
+                    if (max_depth >= 0 && (int64_t)d > max_depth)
+                        throw BfsStopException{};
+                    visited.emplace_back(u, (int64_t)d);
+                });
+        } catch (const BfsStopException &) {
+            /* intentional early stop: max_depth exceeded */
+        }
 
-        pg.graph.forNodes([&](NetworKit::node u) {
-            Datum values[2]; bool nulls[2] = {false, dist[u] < 0};
+        for (const auto &[u, d] : visited) {
+            Datum values[2]; bool nulls[2] = {false, false};
             values[0] = Int64GetDatum(pg.id_map.resolve(u));
-            if (dist[u] >= 0) values[1] = Float8GetDatum((double)dist[u]);
+            values[1] = Float8GetDatum((double)d);
             srf_emit(s, values, nulls);
-        });
+        }
     }
     return srf_end(s, fcinfo);
 }
@@ -336,10 +356,6 @@ Datum age_gds_bfs_stream(PG_FUNCTION_ARGS)
  * visited (Neo4j's real semantics) -- nodeIds is then the (possibly
  * reduced) visited-node list, unlike the SQL bfs_stream's per-target
  * distance output (that stays SQL-only under its `target_nodes` param). */
-
-namespace {
-struct BfsStopException {};
-}
 
 PG_FUNCTION_INFO_V1(age_gds_bfs_stream_cypher);
 
@@ -371,7 +387,7 @@ Datum age_gds_bfs_stream_cypher(PG_FUNCTION_ARGS)
         NetworKit::Traversal::BFSfrom(pg.graph, src,
             [&](NetworKit::node u, NetworKit::count d) {
                 if (max_depth >= 0 && (int64_t)d > max_depth)
-                    return;
+                    throw BfsStopException{};
                 visited.push_back(pg.id_map.resolve(u));
                 if (has_targets && targets.count(u) && --remaining == 0)
                     throw BfsStopException{};

@@ -19,17 +19,27 @@ age_gds.bfs_stream(
 ```
 
 Breadth-first search from `source_node`. Returns hop distance (not edge
-weight). `distance` is NULL for nodes unreachable from the source (or beyond
-`max_depth`, when set). `source_node` must be a valid AGE graphid present in
-the graph.
+weight). `source_node` must be a valid AGE graphid present in the graph.
 
-`max_depth` (`-1` = unlimited) caps how far the traversal is *reported* --
-nodes farther than `max_depth` hops get a NULL `distance`, same as
-unreachable nodes.
+**BREAKING CHANGE** (per
+`docs/implemented-plans/bfs-stream-depth-bound-and-sparse-emit.md`): when
+`target_nodes` is not given, the result contains **only** the nodes actually
+reached -- i.e. nodes within `max_depth` hops of `source_node` (or, when
+`max_depth` is `-1`, every node in `source_node`'s connected component).
+`distance` is never NULL in this form's result rows; nodes beyond
+`max_depth` or outside the component are simply absent, not NULL-padded.
+`max_depth` (`-1` = unlimited) now also bounds the traversal itself -- the
+underlying `BFSfrom` walk stops once it would visit a node past
+`max_depth`, rather than visiting the whole connected component and
+discarding out-of-range nodes afterwards.
 
-`target_nodes`, when given, restricts the result to just those nodes (one
-row per entry) and switches to `NetworKit::MultiTargetBFS`, which stops
-once every target has been found rather than visiting the whole graph.
+`target_nodes`, when given, is unaffected by the above: it restricts the
+result to just those nodes (one row per entry, `distance` NULL for any that
+are unreachable or beyond `max_depth`) and switches to
+`NetworKit::MultiTargetBFS`, which stops once every target has been found
+rather than visiting the whole graph.
+
+See also: [Plan: `bfs_stream` Depth-Bounded Traversal + Sparse Emission](../implemented-plans/bfs-stream-depth-bound-and-sparse-emit.md)
 
 **NetworKit classes:** `NetworKit::Traversal::BFSfrom` (no `target_nodes`),
 `NetworKit::MultiTargetBFS` (`target_nodes` given)

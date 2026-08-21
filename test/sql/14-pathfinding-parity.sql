@@ -70,20 +70,21 @@ $$) AS (id agtype);
 -- =========================================================================
 
 -- Alice's neighborhood is bfs-depth 0 (self), 1 (Bob, Carol), 2 (Dave).
+-- Dave is beyond max_depth => 1, so only Alice, Bob and Carol come back
+-- (sparse emission, per docs/implemented-plans/bfs-stream-depth-bound-and-sparse-emit.md).
 SELECT count(*) FROM age_gds.bfs_stream(
     graph_name  => 'people',
     source_node => (SELECT alice_id FROM alice_tmp),
     max_depth   => 1
 );
--- expected: 4 (one row per graph node -- Alice depth 0, Bob+Carol depth 1,
--- and Dave with a NULL distance since he's beyond max_depth)
+-- expected: 3
 
 SELECT count(*) FILTER (WHERE distance IS NOT NULL) FROM age_gds.bfs_stream(
     graph_name  => 'people',
     source_node => (SELECT alice_id FROM alice_tmp),
     max_depth   => 1
 );
--- expected: 3
+-- expected: 3 (distance is never NULL in this form's rows now)
 
 SELECT "nodeId", distance FROM age_gds.bfs_stream(
     graph_name    => 'people',
@@ -91,6 +92,30 @@ SELECT "nodeId", distance FROM age_gds.bfs_stream(
     target_nodes  => ARRAY[(SELECT dave_id FROM dave_tmp)]
 ) ORDER BY "nodeId";
 -- expected: 1 row, Dave at distance 2
+
+-- Disconnected graph: bfs_stream (unbounded, no target_nodes) must return
+-- only source_node's own component, not NULL-padded rows for the isolated
+-- node -- dedicated fixture, kept separate from 'people' so it doesn't
+-- perturb the whole-graph assertions (spanningTree_stream, maxFlow_stats,
+-- etc.) later in this file.
+SELECT create_graph('pfdisconnected');
+SELECT * FROM cypher('pfdisconnected', $$
+    CREATE (:Person {name: 'Fred'}), (:Person {name: 'Ghost'})
+$$) AS (result agtype);
+SELECT age_gds.graph_project(
+    name       => 'disconnected',
+    age_graph  => 'pfdisconnected',
+    node_query => $$MATCH (n:Person) RETURN id(n) AS id$$,
+    edge_query => $$MATCH (a:Person)-[r:KNOWS]->(b:Person)
+                   RETURN id(a) AS src, id(b) AS dst, 1.0 AS weight$$
+);
+SELECT (id::text)::bigint AS fred_id FROM cypher('pfdisconnected', $$
+    MATCH (n:Person {name:'Fred'}) RETURN id(n) AS id
+$$) AS (id agtype) \gset
+
+SELECT count(*) FROM age_gds.bfs_stream(graph_name => 'disconnected', source_node => :fred_id);
+-- expected: 1 (just Fred; Ghost is in a different component and must be
+-- absent, not emitted with a NULL distance)
 
 -- =========================================================================
 -- dfs_stream: max_depth + target_nodes

@@ -22,3 +22,4 @@ Listed in implementation order.
 - [Plan: New Graph-Theoretic Procedures](06-new-graph-procedures.md)
 - [Plan: Cypher-Callable Interface](cypher-callable-interface.md)
 - [Plan: Per-Theme Function Reference Docs](function-reference-docs.md)
+- [Plan: `bfs_stream` Depth-Bounded Traversal + Sparse Emission](bfs-stream-depth-bound-and-sparse-emit.md)
