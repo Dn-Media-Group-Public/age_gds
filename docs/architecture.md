@@ -896,6 +896,15 @@ parameter:
   boolean (`double_to_agtype_scalar`/`bool_to_agtype_scalar`), no array/map
   packing.
 
+This same `agtype_out` → text → `jsonb_in` pair (and its reverse, `jsonb_out`
+→ text → `agtype_in`) is also exposed directly as public SQL functions/casts
+— `age_gds.agtype_to_jsonb`/`age_gds.jsonb_to_agtype`
+(`age_gds_agtype_to_jsonb`/`age_gds_jsonb_to_agtype` in
+`cypher_agtype.cpp`), registered as explicit `CREATE CAST`s in
+`sql/age_gds--1.0.sql` — not just used internally for Cypher-callable config
+parsing. See
+[docs/reference/utility.md](reference/utility.md#age_gdsagtype_to_jsonb--age_gdsjsonb_to_agtype).
+
 ### Implementation pattern per function
 
 Each function's existing "core" — everything after argument resolution,
@@ -921,7 +930,8 @@ even though `age.so` is already resident (loaded via `sql/age_gds--1.0.sql`'s
 succeeds at `CREATE FUNCTION` time). `age_gds.control` declares `requires =
 'age'`.
 
-See also: [Plan: Cypher-Callable Interface](implemented-plans/cypher-callable-interface.md)
+See also: [Plan: Cypher-Callable Interface](implemented-plans/cypher-callable-interface.md),
+[Plan: `agtype`/`jsonb` SQL Interop](implemented-plans/agtype-jsonb-sql-interop.md)
 
 ---
 

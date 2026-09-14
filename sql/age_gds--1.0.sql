@@ -1326,3 +1326,25 @@ CREATE FUNCTION age_gds.graph_is_stale("graphName" ag_catalog.agtype)
     RETURNS ag_catalog.agtype
     AS 'age_gds', 'age_gds_graph_is_stale_cypher'
     LANGUAGE C;
+
+-- -------------------------------------------------------------------------
+-- agtype <-> jsonb SQL interop (plain SQL only, no Cypher overload -- jsonb
+-- has no representation in Cypher's type system)
+-- -------------------------------------------------------------------------
+
+CREATE FUNCTION age_gds.agtype_to_jsonb(a ag_catalog.agtype) RETURNS jsonb
+    AS 'age_gds', 'age_gds_agtype_to_jsonb'
+    LANGUAGE C IMMUTABLE STRICT;
+
+-- Explicit-only cast: satisfies `properties::jsonb` call sites without
+-- being picked up by implicit/assignment coercion.
+CREATE CAST (ag_catalog.agtype AS jsonb)
+    WITH FUNCTION age_gds.agtype_to_jsonb(ag_catalog.agtype);
+
+CREATE FUNCTION age_gds.jsonb_to_agtype(j jsonb) RETURNS ag_catalog.agtype
+    AS 'age_gds', 'age_gds_jsonb_to_agtype'
+    LANGUAGE C IMMUTABLE STRICT;
+
+-- Explicit-only, same reasoning as the forward cast above.
+CREATE CAST (jsonb AS ag_catalog.agtype)
+    WITH FUNCTION age_gds.jsonb_to_agtype(jsonb);

@@ -365,3 +365,25 @@ Datum CypherResultBuilder::finish()
     JsonbToCString(&buf, &jb->root, VARSIZE(jb));
     return agtype_from_cstring(buf.data);
 }
+
+/* ------------------------------------------------------------- public agtype <-> jsonb casts */
+
+extern "C" {
+
+PG_FUNCTION_INFO_V1(age_gds_agtype_to_jsonb);
+
+Datum age_gds_agtype_to_jsonb(PG_FUNCTION_ARGS)
+{
+    char *repr = agtype_arg_to_text(fcinfo, 0);
+    PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in, CStringGetDatum(repr)));
+}
+
+PG_FUNCTION_INFO_V1(age_gds_jsonb_to_agtype);
+
+Datum age_gds_jsonb_to_agtype(PG_FUNCTION_ARGS)
+{
+    char *repr = DatumGetCString(DirectFunctionCall1(jsonb_out, PG_GETARG_DATUM(0)));
+    PG_RETURN_DATUM(agtype_from_cstring(repr));
+}
+
+} /* extern "C" */
