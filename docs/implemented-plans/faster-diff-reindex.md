@@ -386,3 +386,26 @@ section when it is moved to `implemented-plans/`.
   explicitly: note the shorter form.
 - Add "See also: [Plan: Faster diff-and-apply reindex](../implemented-plans/faster-diff-reindex.md)"
   in each updated section; update `docs/implemented-plans/index.md` when moved.
+
+## Results
+
+Measured with `docker/bench-reindex.sh 300000 750000 omitted false` (PostgreSQL 16,
+AGE PG16, throw-away container, final build = items 1+2+3, queries omitted,
+unweighted). Plan-time baseline figures are from the Problem sections above;
+the baseline, the per-stage (+1, +1+2) runs, the Cypher/weighted runs and the 3x
+scale check were **not** re-run.
+
+| Step | Baseline (plan) | Final build |
+|---|---|---|
+| initial `graph_project` (incremental) | ~7.7 s | 0.83 s |
+| no-change `graph_reindex` | 7.7 s | 1.71 s |
+| delta 100 / 400 / 1,600 / 6,400 / 25,600 new edges | 13.2 s / 27.3 s / 85.9 s / n/a / n/a | 1.64 / 1.70 / 1.65 / 1.67 / 1.69 s |
+| bulk delta 50,000 edges (+2,500 vertices) | intractable | 1.82 s |
+
+Per-edge apply cost is now negligible (flat within noise); the remaining ~1.7 s is the
+SQL read plus deserialization. Correctness (C.5): after all deltas the incrementally
+maintained projection had 304,205 nodes / 834,098 edges versus 304,205 / 834,100 after
+`graph_reindex(name, true)`. The 2-edge difference is probably duplicate random
+`(src,dst)` pairs, which the identity-keyed diff collapses (pre-existing behaviour, not
+introduced here); this was not verified further. BFS/WCC equivalence is covered at small
+scale by `23-diff-reindex-slot-map.sql`.

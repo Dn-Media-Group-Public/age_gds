@@ -143,7 +143,14 @@ static void do_graph_project(
         g_xact_cb_registered = true;
     }
 
-    /* ---- Load graph from AGE via Cypher queries ---- */
+    /* Both queries NULL = whole graph (SQL-loaded); exactly one is an error. */
+    if ((node_query_str == nullptr) != (edge_query_str == nullptr))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("graph_project: node_query and edge_query must both be "
+                        "given or both omitted (omitted = the whole graph)")));
+
+    /* ---- Load graph from AGE (Cypher queries, or SQL for the whole graph) ---- */
     LoadedGraph loaded = age_load_graph(
         age_graph_str, node_query_str, edge_query_str, directed, weighted);
 
@@ -196,8 +203,8 @@ static void do_graph_project(
     Datum args[12] = {
         CStringGetTextDatum(name_str),        /* $1  name        */
         CStringGetTextDatum(age_graph_str),   /* $2  age_graph   */
-        CStringGetTextDatum(node_query_str),  /* $3  node_query  */
-        CStringGetTextDatum(edge_query_str),  /* $4  edge_query  */
+        node_query_str ? CStringGetTextDatum(node_query_str) : (Datum) 0,  /* $3  node_query  */
+        edge_query_str ? CStringGetTextDatum(edge_query_str) : (Datum) 0,  /* $4  edge_query  */
         Int64GetDatum(node_count),            /* $5  node_count  */
         Int64GetDatum(edge_count),            /* $6  edge_count  */
         BoolGetDatum(directed),               /* $7  directed    */
@@ -207,7 +214,8 @@ static void do_graph_project(
         CStringGetTextDatum(edges_path),      /* $11 edges_file_path */
         BoolGetDatum(incremental)             /* $12 incremental */
     };
-    char  nulls[13] = {' ',' ',' ',' ',' ',' ',' ',' ',
+    char  nulls[13] = {' ',' ',(char) (node_query_str ? ' ' : 'n'),
+                       (char) (edge_query_str ? ' ' : 'n'),' ',' ',' ',' ',
                        (char) (file_path[0]  == '\0' ? 'n' : ' '),
                        (char) (nodes_path[0] == '\0' ? 'n' : ' '),
                        (char) (edges_path[0] == '\0' ? 'n' : ' '),
@@ -245,8 +253,8 @@ Datum age_gds_graph_project(PG_FUNCTION_ARGS)
 {
     char *name_str       = text_to_cstring(PG_GETARG_TEXT_PP(0));
     char *age_graph_str  = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    char *node_query_str = text_to_cstring(PG_GETARG_TEXT_PP(2));
-    char *edge_query_str = text_to_cstring(PG_GETARG_TEXT_PP(3));
+    char *node_query_str = PG_ARGISNULL(2) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(2));
+    char *edge_query_str = PG_ARGISNULL(3) ? nullptr : text_to_cstring(PG_GETARG_TEXT_PP(3));
     bool  directed       = PG_GETARG_BOOL(4);
     bool  weighted       = PG_GETARG_BOOL(5);
     bool  incremental    = PG_GETARG_BOOL(6);
@@ -329,9 +337,10 @@ Datum age_gds_graph_project_cypher(PG_FUNCTION_ARGS)
 
     Jsonb *node_proj = agtype_arg_to_jsonb_any(fcinfo, 1);
     Jsonb *rel_proj  = agtype_arg_to_jsonb_any(fcinfo, 2);
-    if (!node_proj || !rel_proj)
+    if (!node_proj != !rel_proj)
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                        errmsg("graph_project: nodeProjection and relationshipProjection are required")));
+                        errmsg("graph_project: nodeProjection and relationshipProjection "
+                               "must both be given or both NULL (NULL = the whole graph)")));
 
     CypherConfig cfg = parse_cypher_config(fcinfo, 3);
     cfg.validate_keys({"ageGraph", "directed", "weighted", "incremental"});
@@ -344,10 +353,15 @@ Datum age_gds_graph_project_cypher(PG_FUNCTION_ARGS)
     cfg.get_bool("weighted", weighted);
     cfg.get_bool("incremental", incremental);
 
-    std::string node_query = translate_projection(node_proj, true, "nodeProjection");
-    std::string edge_query = translate_projection(rel_proj, false, "relationshipProjection");
+    std::string node_query, edge_query;
+    if (node_proj) {
+        node_query = translate_projection(node_proj, true, "nodeProjection");
+        edge_query = translate_projection(rel_proj, false, "relationshipProjection");
+    }
 
-    do_graph_project(name.c_str(), age_graph.c_str(), node_query.c_str(), edge_query.c_str(),
+    do_graph_project(name.c_str(), age_graph.c_str(),
+                     node_proj ? node_query.c_str() : nullptr,
+                     node_proj ? edge_query.c_str() : nullptr,
                      directed, weighted, incremental);
 
     CypherResultBuilder b(false);

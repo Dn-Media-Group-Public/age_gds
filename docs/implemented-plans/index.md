@@ -24,3 +24,4 @@ Listed in implementation order.
 - [Plan: Per-Theme Function Reference Docs](function-reference-docs.md)
 - [Plan: `bfs_stream` Depth-Bounded Traversal + Sparse Emission](bfs-stream-depth-bound-and-sparse-emit.md)
 - [Plan: `agtype`/`jsonb` SQL Interop](agtype-jsonb-sql-interop.md)
+- [Plan: Faster diff-and-apply reindex](faster-diff-reindex.md)

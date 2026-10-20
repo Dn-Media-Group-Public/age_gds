@@ -10,6 +10,11 @@ struct LoadedGraph {
     NodeIdMap        id_map;
 };
 
+// node_query / edge_query: both NULL (or empty) = the whole AGE graph, read
+// with SQL from <graph>._ag_label_vertex / _ag_label_edge (no Cypher). With
+// the whole-graph form, weighted=false never reads edge properties and
+// weighted=true uses the edge's numeric `weight` property (else 1.0). Giving
+// exactly one of the two queries is an error.
 LoadedGraph age_load_graph(
     const char *age_graph_name,
     const char *node_query,
@@ -18,6 +23,8 @@ LoadedGraph age_load_graph(
     bool        weighted
 );
 
+// (An empty `edge_query` means a whole-graph projection: the property is read
+// from the edge label parent with SQL.)
 // Re-run `edge_query` (the same query used at projection time) against the
 // AGE graph `age_graph_name`, but substitute `weight_property` for whatever
 // property the original query used to populate its "weight" column, and
@@ -39,3 +46,8 @@ NetworKit::Graph reweight_from_property(
     const char             *edge_query,
     const char             *weight_property
 );
+
+// Run, inside an already-open SPI session, the whole-graph read of one vertex
+// property: columns (id, property agtype-or-NULL) from <graph>._ag_label_vertex.
+// The property name is a bound parameter. Returns the SPI return code.
+int age_spi_read_node_property(const char *age_graph_name, const char *property);

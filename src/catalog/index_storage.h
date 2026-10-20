@@ -46,6 +46,11 @@ struct IndexDeserializedGraph {
         uint64_t,
         PairHash
     > edge_file_index;
+
+    // graphid -> slot in the nodes file, live nodes only.  NOT the same as
+    // id_map.graphid_to_nk: nk ids are compacted past tombstones, so nk == slot
+    // only while the file has no dead slots.
+    std::unordered_map<int64_t, uint64_t> node_slot_by_graphid;
 };
 
 // ---------------------------------------------------------------------------
@@ -116,6 +121,31 @@ void index_storage_bump_version(const char *nodes_path);
 // so the caller can force it past a previously-observed value and guarantee
 // every session cache's version check notices the change.
 void index_storage_set_version(const char *nodes_path, uint64_t version);
+
+// Batched writer for diff-and-apply: opens both files once, keeps the headers
+// in memory and writes them in flush() (also called by the destructor, which
+// never throws).  Does NOT bump version_counter.  Caller holds the index lock.
+class IndexBatchWriter {
+public:
+    IndexBatchWriter(const char *nodes_path, const char *edges_path);
+    ~IndexBatchWriter();
+    IndexBatchWriter(const IndexBatchWriter &) = delete;
+    IndexBatchWriter &operator=(const IndexBatchWriter &) = delete;
+
+    uint64_t add_node(int64_t graphid);
+    void     kill_node(uint64_t slot);
+    uint64_t add_edge(uint64_t src_slot, uint64_t dst_slot, double weight);
+    void     kill_edge(uint64_t slot);
+    void     set_edge_weight(uint64_t slot, double weight);
+    void     flush();
+
+private:
+    std::string nodes_path_, edges_path_;
+    int         nfd_ = -1, efd_ = -1;
+    uint64_t    node_capacity_ = 0, live_nodes_ = 0;
+    uint64_t    edge_capacity_ = 0, live_edges_ = 0;
+    bool        dirty_ = false;
+};
 
 // Deserialize both files into an IndexDeserializedGraph.
 // Slot indices in the file are mapped to compact nk::nodes in the result.

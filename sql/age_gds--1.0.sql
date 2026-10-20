@@ -57,8 +57,8 @@ CREATE TABLE age_gds.index_triggers (
 CREATE FUNCTION age_gds.graph_project(
     name        text,
     age_graph   text,
-    node_query  text,
-    edge_query  text,
+    node_query  text    DEFAULT NULL,   -- NULL (both) = the whole AGE graph, SQL-loaded
+    edge_query  text    DEFAULT NULL,
     directed    boolean DEFAULT false,
     weighted    boolean DEFAULT false,
     incremental boolean DEFAULT false

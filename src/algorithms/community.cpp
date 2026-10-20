@@ -100,7 +100,7 @@ static GraphHandle resolve_graph_args(FunctionCallInfo fcinfo)
 // edge_query limitation).
 static void require_node_query(const ProjectedGraph &pg, const char *what)
 {
-    if (pg.age_graph.empty() || pg.node_query.empty())
+    if (pg.age_graph.empty())
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("%s requires graph \"%s\" to have its age_graph/node_query "

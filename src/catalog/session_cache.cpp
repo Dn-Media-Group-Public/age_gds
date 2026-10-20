@@ -115,6 +115,7 @@ static void load_live_into_cache(const std::string &name,
     pg.age_graph        = age_graph;
     pg.node_query       = node_query;
     pg.edge_query       = edge_query;
+    pg.whole_graph      = node_query.empty() && edge_query.empty();
 
     auto [ins_it, ok] = g_cache.emplace(name, std::move(pg));
     (void) ok;
@@ -219,6 +220,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
                 new_pg.age_graph       = age_graph_saved;
                 new_pg.node_query      = node_query_saved;
                 new_pg.edge_query      = edge_query_saved;
+                new_pg.whole_graph     = node_query_saved.empty() && edge_query_saved.empty();
 
                 g_cache.erase(it);
                 auto [ins_it, ok] = g_cache.emplace(name, std::move(new_pg));
@@ -374,6 +376,7 @@ const ProjectedGraph& session_cache_get(const char *graph_name)
     pg.age_graph       = age_graph_buf;
     pg.node_query      = node_query_buf;
     pg.edge_query      = edge_query_buf;
+    pg.whole_graph     = node_query_buf[0] == '\0' && edge_query_buf[0] == '\0';
 
     auto [ins_it, ok] = g_cache.emplace(name, std::move(pg));
     (void) ok;
@@ -443,10 +446,11 @@ GraphHandle get_or_load_graph(
     if (graph_name) {
         h.pg = &session_cache_get(graph_name);
     } else {
-        if (!node_query || !edge_query)
+        if ((node_query == nullptr) != (edge_query == nullptr))
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("age_graph requires node_query and edge_query")));
+                     errmsg("age_graph requires node_query and edge_query "
+                            "both given, or both omitted for the whole graph")));
         LoadedGraph lg = age_load_graph(age_graph, node_query, edge_query,
                                         directed, weighted);
         h.owned.emplace();
@@ -456,8 +460,9 @@ GraphHandle get_or_load_graph(
         h.owned->directed     = directed;
         h.owned->weighted     = weighted;
         h.owned->age_graph    = age_graph;
-        h.owned->node_query   = node_query;
-        h.owned->edge_query   = edge_query;
+        h.owned->node_query   = node_query ? node_query : "";
+        h.owned->edge_query   = edge_query ? edge_query : "";
+        h.owned->whole_graph  = !node_query;
         h.owned->approx_bytes = 0;
         h.owned->last_used    = std::chrono::steady_clock::now();
         h.owned->live         = false;

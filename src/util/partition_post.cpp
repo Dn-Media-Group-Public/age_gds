@@ -14,6 +14,7 @@
 #include "util/partition_post.h"
 
 #include <regex>
+#include "bridge/age_loader.h"
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -69,35 +70,43 @@ std::vector<std::pair<int64_t, std::string>> run_node_property_query(
     const char *node_query,
     const char *property)
 {
-    std::string q(node_query);
-
-    std::regex id_re(R"(id\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+id\b)",
-                      std::regex::icase);
-    std::smatch m;
-    if (!std::regex_search(q, m, id_re))
-        throw std::runtime_error(
-            "run_node_property_query: could not locate a "
-            "\"RETURN id(<alias>) AS id\" projection in the stored "
-            "node_query; reading a node property for this call requires "
-            "the projection's node_query to follow the documented "
-            "convention (see docs/architecture.md)");
-
-    std::string alias = m[1].str();
-    std::string replacement =
-        m[0].str() + ", " + alias + "." + std::string(property) + " AS value";
-    std::string new_q = q.substr(0, (size_t)m.position(0))
-                       + replacement
-                       + q.substr((size_t)m.position(0) + (size_t)m.length(0));
-
     SPI_connect();
+    int ret;
 
-    std::string sql =
-        std::string("SELECT * FROM ag_catalog.cypher('")
-        + age_graph_name
-        + "', $$ " + new_q
-        + " $$) AS (id agtype, value agtype)";
+    if (!node_query || !*node_query) {
+        /* Whole-graph projection: read the property from the vertex parent. */
+        ret = age_spi_read_node_property(age_graph_name, property);
+    } else {
+        std::string q(node_query);
 
-    int ret = SPI_execute(sql.c_str(), true, 0);
+        std::regex id_re(R"(id\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+AS\s+id\b)",
+                          std::regex::icase);
+        std::smatch m;
+        if (!std::regex_search(q, m, id_re)) {
+            SPI_finish();
+            throw std::runtime_error(
+                "run_node_property_query: could not locate a "
+                "\"RETURN id(<alias>) AS id\" projection in the stored "
+                "node_query; reading a node property for this call requires "
+                "the projection's node_query to follow the documented "
+                "convention (see docs/architecture.md)");
+        }
+
+        std::string alias = m[1].str();
+        std::string replacement =
+            m[0].str() + ", " + alias + "." + std::string(property) + " AS value";
+        std::string new_q = q.substr(0, (size_t)m.position(0))
+                           + replacement
+                           + q.substr((size_t)m.position(0) + (size_t)m.length(0));
+
+        std::string sql =
+            std::string("SELECT * FROM ag_catalog.cypher('")
+            + age_graph_name
+            + "', $$ " + new_q
+            + " $$) AS (id agtype, value agtype)";
+        ret = SPI_execute(sql.c_str(), true, 0);
+    }
+
     if (ret != SPI_OK_SELECT) {
         SPI_finish();
         throw std::runtime_error(

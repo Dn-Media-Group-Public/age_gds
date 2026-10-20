@@ -136,6 +136,15 @@ SELECT age_gds.graph_project(
 );
 ```
 
+To project the **whole** graph (every vertex and edge), omit both queries; it
+is then read with plain SQL, much faster than the Cypher form:
+
+```sql
+SELECT age_gds.graph_project(name => 'social_all', age_graph => 'social');
+```
+
+See also: [Plan: Faster diff-and-apply reindex](implemented-plans/faster-diff-reindex.md)
+
 ### Run PageRank
 
 ```sql
@@ -741,10 +750,10 @@ require exactly one graph source.
 ### `age_graph requires node_query and edge_query`
 
 ```
-ERROR:  age_graph requires node_query and edge_query
+ERROR:  age_graph requires node_query and edge_query both given, or both omitted for the whole graph
 ```
 
-In anonymous mode, both `node_query` and `edge_query` must be non-NULL.
+In anonymous mode, give both `node_query` and `edge_query`, or neither (whole graph).
 
 ### `source_node is required`
 

@@ -445,6 +445,106 @@ void index_storage_set_version(const char *nodes_path, uint64_t version)
     }
 }
 
+IndexBatchWriter::IndexBatchWriter(const char *nodes_path, const char *edges_path)
+    : nodes_path_(nodes_path), edges_path_(edges_path)
+{
+    try {
+        nfd_ = open_rdwr(nodes_path);
+        efd_ = open_rdwr(edges_path);
+        NodesFileHeader nh = read_nodes_hdr(nfd_, nodes_path);
+        EdgesFileHeader eh = read_edges_hdr(efd_, edges_path);
+        node_capacity_ = nh.node_capacity;
+        live_nodes_    = nh.live_node_count;
+        edge_capacity_ = eh.edge_capacity;
+        live_edges_    = eh.live_edge_count;
+    } catch (...) {
+        if (nfd_ >= 0) ::close(nfd_);
+        if (efd_ >= 0) ::close(efd_);
+        throw;
+    }
+}
+
+IndexBatchWriter::~IndexBatchWriter()
+{
+    try { flush(); } catch (...) {}
+    ::close(nfd_);
+    ::close(efd_);
+}
+
+void IndexBatchWriter::flush()
+{
+    if (!dirty_) return;
+    // Re-read the headers so version_counter/flags/magic are preserved.
+    NodesFileHeader nh = read_nodes_hdr(nfd_, nodes_path_.c_str());
+    nh.node_capacity   = node_capacity_;
+    nh.live_node_count = live_nodes_;
+    pw_checked(nfd_, &nh, sizeof(nh), 0, nodes_path_.c_str());
+
+    EdgesFileHeader eh = read_edges_hdr(efd_, edges_path_.c_str());
+    eh.edge_capacity   = edge_capacity_;
+    eh.live_edge_count = live_edges_;
+    pw_checked(efd_, &eh, sizeof(eh), 0, edges_path_.c_str());
+    dirty_ = false;
+}
+
+uint64_t IndexBatchWriter::add_node(int64_t graphid)
+{
+    uint64_t slot = node_capacity_;
+    NodeRecord rec{};
+    rec.graphid = graphid;
+    pw_checked(nfd_, &rec, sizeof(rec),
+               static_cast<off_t>(sizeof(NodesFileHeader) + slot * sizeof(NodeRecord)),
+               nodes_path_.c_str());
+    node_capacity_++; live_nodes_++; dirty_ = true;
+    return slot;
+}
+
+void IndexBatchWriter::kill_node(uint64_t slot)
+{
+    off_t off = static_cast<off_t>(sizeof(NodesFileHeader) + slot * sizeof(NodeRecord));
+    NodeRecord rec{};
+    pr_checked(nfd_, &rec, sizeof(rec), off, nodes_path_.c_str());
+    rec.dead = 1;
+    rec.graphid = -1;
+    pw_checked(nfd_, &rec, sizeof(rec), off, nodes_path_.c_str());
+    if (live_nodes_ > 0) live_nodes_--;
+    dirty_ = true;
+}
+
+uint64_t IndexBatchWriter::add_edge(uint64_t src_slot, uint64_t dst_slot, double weight)
+{
+    uint64_t slot = edge_capacity_;
+    EdgeRecord rec{};
+    rec.src_nk = src_slot;
+    rec.dst_nk = dst_slot;
+    rec.weight = weight;
+    pw_checked(efd_, &rec, sizeof(rec),
+               static_cast<off_t>(sizeof(EdgesFileHeader) + slot * sizeof(EdgeRecord)),
+               edges_path_.c_str());
+    edge_capacity_++; live_edges_++; dirty_ = true;
+    return slot;
+}
+
+void IndexBatchWriter::kill_edge(uint64_t slot)
+{
+    off_t off = static_cast<off_t>(sizeof(EdgesFileHeader) + slot * sizeof(EdgeRecord));
+    EdgeRecord rec{};
+    pr_checked(efd_, &rec, sizeof(rec), off, edges_path_.c_str());
+    rec.dead = 1;
+    pw_checked(efd_, &rec, sizeof(rec), off, edges_path_.c_str());
+    if (live_edges_ > 0) live_edges_--;
+    dirty_ = true;
+}
+
+void IndexBatchWriter::set_edge_weight(uint64_t slot, double weight)
+{
+    off_t off = static_cast<off_t>(sizeof(EdgesFileHeader) + slot * sizeof(EdgeRecord));
+    EdgeRecord rec{};
+    pr_checked(efd_, &rec, sizeof(rec), off, edges_path_.c_str());
+    rec.weight = weight;
+    pw_checked(efd_, &rec, sizeof(rec), off, edges_path_.c_str());
+}
+
 IndexDeserializedGraph index_storage_deserialize(
     const char *nodes_path,
     const char *edges_path)
@@ -483,6 +583,7 @@ IndexDeserializedGraph index_storage_deserialize(
                 NetworKit::node nk = result.graph.addNode();
                 result.id_map.graphid_to_nk[rec.graphid] = nk;
                 result.id_map.nk_to_graphid[nk]          = rec.graphid;
+                result.node_slot_by_graphid[rec.graphid] = i;
                 slot_to_nk[i] = nk;
             }
             ::close(fd);

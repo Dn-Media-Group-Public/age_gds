@@ -128,6 +128,24 @@ from scratch (`index_storage_write_initial`), like a fresh `graph_project`.
 This reuses the exact same session-cache version-check machinery live indices
 already use (`incremental` gates that code path, not `live`).
 
+**Slots vs NetworKit ids.** Records and edges address nodes by *slot* (position
+in the `.nodes` file). `index_storage_deserialize` assigns NetworKit ids with
+`graph.addNode()` while skipping tombstones, so `nk == slot` only while the
+file has no dead slots. `NodeIdMap` is therefore not a graphid -> slot map;
+`IndexDeserializedGraph::node_slot_by_graphid` is, and the diff uses it (O(1)
+instead of a linear `index_storage_find_node` scan per added edge). The diff
+applies through `IndexBatchWriter`, which opens both files once and writes the
+headers in `flush()`; `version_counter` is bumped afterwards.
+
+**Whole-graph projections.** `node_query`/`edge_query` NULL means "the whole
+AGE graph": `age_load_graph` reads ids (and, if weighted, `weight`) with SQL from
+the label-table inheritance parents. `ProjectedGraph::whole_graph` records this
+in memory (distinct from `age_graph` empty = no AGE source recorded); readers of
+the stored query text (`reweight_from_property`, `read_node_property_as_*`)
+read from `properties` with SQL when the query is empty.
+
+See also: [Plan: Faster diff-and-apply reindex](../implemented-plans/faster-diff-reindex.md)
+
 ### Anonymous execution (query-scoped)
 
 ```

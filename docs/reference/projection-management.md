@@ -91,6 +91,10 @@ Behaviour depends on the projection's storage kind (`incremental`) and mode
   (AGE graphid for nodes, `(src_gid, dst_gid)` for edges). Adds/removes only
   the delta; an edge present in both with a changed weight is updated in place
   rather than tombstoned and re-appended. Bumps `version_counter` once.
+  Cost model: the apply phase is O(delta) (graphid -> slot is a hash lookup,
+  both files are opened once); what remains is the full read of the AGE graph
+  plus deserializing the slot files, independent of the delta size.
+  See also: [Plan: Faster diff-and-apply reindex](../implemented-plans/faster-diff-reindex.md)
 
 - **Compact (live, default)**: rewrites the `.nodes`/`.edges` files without
   tombstoned entries. Does **not** reload data from AGE; only removes stale
@@ -132,15 +136,27 @@ RETURN age_gds.graph_reindex('proj', {force: true})
 age_gds.graph_project(
     name        text,
     age_graph   text,
-    node_query  text,
-    edge_query  text,
+    node_query  text    DEFAULT NULL,
+    edge_query  text    DEFAULT NULL,
     directed    boolean DEFAULT false,
     weighted    boolean DEFAULT false,
     incremental boolean DEFAULT false
 ) RETURNS void
 ```
 
-Projects an AGE Cypher graph into a persistent NetworKit graph. Execution:
+Projects an AGE Cypher graph into a persistent NetworKit graph. Omit both
+`node_query` and `edge_query` (NULL) to project the **whole graph**: every
+vertex and every edge, including labels created later, is then read with plain
+SQL from `<graph>._ag_label_vertex` / `<graph>._ag_label_edge` instead of
+through Cypher (much faster: no endpoint joins). Giving exactly one of the two
+is an error. With `weighted = false` every edge has weight 1 and `properties`
+is never read; with `weighted = true` the weight is the edge's numeric `weight`
+property (missing or non-numeric gives 1.0). The catalog stores NULL queries
+for such a projection; `graph_reindex`, the live index (`graph_index`) and the
+per-call weight / node-property overrides all use the SQL path for it.
+See also: [Plan: Faster diff-and-apply reindex](../implemented-plans/faster-diff-reindex.md)
+
+With explicit queries, execution is:
 
 1. Runs `node_query` against `age_graph` via `ag_catalog.cypher()`. The query
    must return one column named `id` of type `agtype` containing the AGE

@@ -32,6 +32,59 @@ extern "C" {
 
 /* ------------------------------------------------------------------ */
 
+/* A NULL/empty query means "the whole AGE graph", read with plain SQL from
+ * the label-table inheritance parents instead of through Cypher (whose
+ * planner joins every edge to both endpoint vertices). */
+static bool is_unset(const char *q) { return !q || !*q; }
+
+/* Weight text from SQL or Cypher: missing / NULL / non-numeric -> 1.0. */
+static double parse_weight(const char *txt)
+{
+    if (!txt) return 1.0;
+    char  *end;
+    double w = strtod(txt, &end);
+    return end == txt ? 1.0 : w;
+}
+
+/* JSON string literal of `s`, passed as a bound parameter and cast to agtype. */
+static std::string json_quote(const char *s)
+{
+    std::string out = "\"";
+    for (; *s; s++) {
+        unsigned char c = (unsigned char) *s;
+        if (c == '"' || c == '\\') { out += '\\'; out += (char) c; }
+        else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); out += b; }
+        else out += (char) c;
+    }
+    return out + "\"";
+}
+
+/* "<schema>._ag_label_vertex" / "_ag_label_edge", schema quoted as identifier. */
+static std::string label_parent(const char *age_graph_name, const char *parent)
+{
+    return std::string(quote_identifier(age_graph_name)) + "." + parent;
+}
+
+/* SELECT <key>, <agtype property> FROM <parent>; property name is bound. */
+static int exec_property_select(const char *key_cols, const std::string &parent,
+                                const char *property)
+{
+    std::string sql = std::string("SELECT ") + key_cols
+        + ", ag_catalog.agtype_access_operator(properties, $1::ag_catalog.agtype) FROM "
+        + parent;
+    std::string prop = json_quote(property);
+    Oid   argtypes[1] = {TEXTOID};
+    Datum args[1]     = {CStringGetTextDatum(prop.c_str())};
+    return SPI_execute_with_args(sql.c_str(), 1, argtypes, args, nullptr, true, 0);
+}
+
+/* Cursor-free SPI helper shared by the property readers (see header). */
+int age_spi_read_node_property(const char *age_graph_name, const char *property)
+{
+    return exec_property_select("id", label_parent(age_graph_name, "_ag_label_vertex"),
+                                property);
+}
+
 LoadedGraph age_load_graph(
     const char *age_graph_name,
     const char *node_query,
@@ -41,6 +94,13 @@ LoadedGraph age_load_graph(
 {
     LoadedGraph result;
     result.graph = NetworKit::Graph(0, weighted, directed);
+
+    if (is_unset(node_query) != is_unset(edge_query))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("node_query and edge_query must both be given or both "
+                        "omitted (omitted = the whole graph)")));
+    const bool whole = is_unset(node_query);
 
     SPI_connect();
 
@@ -72,10 +132,11 @@ LoadedGraph age_load_graph(
 
     /* ---- 2. Load nodes ---- */
     {
-        std::string sql =
-            std::string("SELECT * FROM ag_catalog.cypher('")
-            + age_graph_name
-            + "', $$ " + node_query + " $$) AS (id agtype)";
+        std::string sql = whole
+            ? "SELECT id FROM " + label_parent(age_graph_name, "_ag_label_vertex")
+            : std::string("SELECT * FROM ag_catalog.cypher('")
+              + age_graph_name
+              + "', $$ " + node_query + " $$) AS (id agtype)";
 
         int ret = SPI_execute(sql.c_str(), true, 0);
         if (ret != SPI_OK_SELECT) {
@@ -100,11 +161,21 @@ LoadedGraph age_load_graph(
 
     /* ---- 3. Load edges ---- */
     {
-        std::string sql =
-            std::string("SELECT * FROM ag_catalog.cypher('")
-            + age_graph_name
-            + "', $$ " + edge_query
-            + " $$) AS (src agtype, dst agtype, weight agtype)";
+        /* Unweighted whole-graph reads never touch `properties`. */
+        std::string sql;
+        if (whole) {
+            std::string parent = label_parent(age_graph_name, "_ag_label_edge");
+            sql = weighted
+                ? "SELECT start_id, end_id, "
+                  "ag_catalog.agtype_access_operator(properties, '\"weight\"'::ag_catalog.agtype) FROM "
+                  + parent
+                : "SELECT start_id, end_id FROM " + parent;
+        } else {
+            sql = std::string("SELECT * FROM ag_catalog.cypher('")
+                + age_graph_name
+                + "', $$ " + edge_query
+                + " $$) AS (src agtype, dst agtype, weight agtype)";
+        }
 
         int ret = SPI_execute(sql.c_str(), true, 0);
         if (ret != SPI_OK_SELECT) {
@@ -140,11 +211,8 @@ LoadedGraph age_load_graph(
             NetworKit::node dst_nk = dit->second;
 
             double w = 1.0;
-            if (ncols >= 3) {
-                char *wt_txt = SPI_getvalue(tup, desc, 3);
-                if (wt_txt)
-                    w = strtod(wt_txt, nullptr);
-            }
+            if (ncols >= 3)
+                w = parse_weight(SPI_getvalue(tup, desc, 3));
 
             if (weighted)
                 result.graph.addEdge(src_nk, dst_nk,
@@ -173,40 +241,51 @@ NetworKit::Graph reweight_from_property(
     NetworKit::Graph result(g, /* weighted */ true, g.isDirected(),
                             /* edgesIndexed */ false);
 
-    /* Find the relationship alias bound in the MATCH clause, e.g.
-     * "-[r:KNOWS]->" or "-[r]->", so the substituted projection reads
-     * `<alias>.<weight_property>` rather than assuming the alias "r". */
-    std::string q(edge_query);
-    std::regex  alias_re(R"(-\[\s*([A-Za-z_][A-Za-z0-9_]*))");
-    std::smatch alias_m;
-    std::string alias = "r";
-    if (std::regex_search(q, alias_m, alias_re))
-        alias = alias_m[1].str();
-
-    /* Replace the third RETURN projection (originally aliased "AS weight")
-     * with `<alias>.<weight_property>`, leaving src/dst untouched. */
-    std::regex  weight_re(R"((,\s*)([^,]+?)(\s+AS\s+weight\b))",
-                          std::regex::icase);
-    std::string replacement = "$1" + alias + "." + std::string(weight_property) + "$3";
-    std::string new_q = std::regex_replace(q, weight_re, replacement,
-                                            std::regex_constants::format_first_only);
-
-    if (new_q == q)
-        throw std::runtime_error(
-            "reweight_from_property: could not locate a \"... AS weight\" "
-            "projection in the stored edge_query; weight_property override "
-            "requires the projection's edge_query to follow the documented "
-            "convention (see docs/architecture.md)");
-
     SPI_connect();
+    int ret;
 
-    std::string sql =
-        std::string("SELECT * FROM ag_catalog.cypher('")
-        + age_graph_name
-        + "', $$ " + new_q
-        + " $$) AS (src agtype, dst agtype, weight agtype)";
+    if (is_unset(edge_query)) {
+        /* Whole-graph projection: read the property straight from the edge
+         * label parent (restricted to edges already in `g` below). */
+        ret = exec_property_select("start_id, end_id",
+                                   label_parent(age_graph_name, "_ag_label_edge"),
+                                   weight_property);
+    } else {
+        /* Find the relationship alias bound in the MATCH clause, e.g.
+         * "-[r:KNOWS]->" or "-[r]->", so the substituted projection reads
+         * `<alias>.<weight_property>` rather than assuming the alias "r". */
+        std::string q(edge_query);
+        std::regex  alias_re(R"(-\[\s*([A-Za-z_][A-Za-z0-9_]*))");
+        std::smatch alias_m;
+        std::string alias = "r";
+        if (std::regex_search(q, alias_m, alias_re))
+            alias = alias_m[1].str();
 
-    int ret = SPI_execute(sql.c_str(), true, 0);
+        /* Replace the third RETURN projection (originally aliased "AS weight")
+         * with `<alias>.<weight_property>`, leaving src/dst untouched. */
+        std::regex  weight_re(R"((,\s*)([^,]+?)(\s+AS\s+weight\b))",
+                              std::regex::icase);
+        std::string replacement = "$1" + alias + "." + std::string(weight_property) + "$3";
+        std::string new_q = std::regex_replace(q, weight_re, replacement,
+                                                std::regex_constants::format_first_only);
+
+        if (new_q == q) {
+            SPI_finish();
+            throw std::runtime_error(
+                "reweight_from_property: could not locate a \"... AS weight\" "
+                "projection in the stored edge_query; weight_property override "
+                "requires the projection's edge_query to follow the documented "
+                "convention (see docs/architecture.md)");
+        }
+
+        std::string sql =
+            std::string("SELECT * FROM ag_catalog.cypher('")
+            + age_graph_name
+            + "', $$ " + new_q
+            + " $$) AS (src agtype, dst agtype, weight agtype)";
+        ret = SPI_execute(sql.c_str(), true, 0);
+    }
+
     if (ret != SPI_OK_SELECT) {
         SPI_finish();
         ereport(ERROR,
@@ -243,10 +322,7 @@ NetworKit::Graph reweight_from_property(
         if (!result.hasEdge(src_nk, dst_nk))
             continue;
 
-        double w = 1.0;
-        char *wt_txt = SPI_getvalue(tup, desc, 3);
-        if (wt_txt)
-            w = strtod(wt_txt, nullptr);
+        double w = parse_weight(SPI_getvalue(tup, desc, 3));
 
         result.setWeight(src_nk, dst_nk, static_cast<NetworKit::edgeweight>(w));
     }

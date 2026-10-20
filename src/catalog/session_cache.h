@@ -35,6 +35,10 @@ struct ProjectedGraph {
     std::string              age_graph;
     std::string              node_query;
     std::string              edge_query;
+    // True when the projection is the whole AGE graph (catalog node_query and
+    // edge_query are NULL): loaded with SQL, not Cypher. Distinct from
+    // age_graph being empty (= no AGE source recorded).
+    bool                     whole_graph = false;
 
     // --- Live index fields (populated only when live=true) ---
     bool     live             = false;
@@ -112,7 +116,8 @@ struct GraphHandle {
 // Resolve a graph from either the session cache (graph_name non-null)
 // or an anonymous AGE load (age_graph non-null).
 // Exactly one of graph_name / age_graph must be non-null.
-// If age_graph is used, node_query and edge_query must also be non-null.
+// If age_graph is used, node_query and edge_query must both be non-null, or
+// both null for the whole graph (SQL-loaded).
 // Raises ERROR on invalid combinations.
 GraphHandle get_or_load_graph(
     const char *graph_name,

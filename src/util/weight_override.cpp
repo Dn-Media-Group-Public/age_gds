@@ -34,11 +34,11 @@ void apply_weight_override(GraphHandle &gh, const char *weight_property)
 
     const ProjectedGraph &pg = *gh.pg;
 
-    if (pg.age_graph.empty() || pg.edge_query.empty())
+    if (pg.age_graph.empty())
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("weight_property override requires graph \"%s\" to have "
-                        "its age_graph/edge_query recorded in the catalog "
+                        "its age_graph recorded in the catalog "
                         "(re-run graph_project or graph_index to populate them)",
                         pg.name.c_str())));
 
@@ -71,6 +71,7 @@ void apply_weight_override(GraphHandle &gh, const char *weight_property)
     copy.age_graph      = pg.age_graph;
     copy.node_query     = pg.node_query;
     copy.edge_query     = pg.edge_query;
+    copy.whole_graph    = pg.whole_graph;
 
     gh.owned.emplace(std::move(copy));
     gh.pg = &*gh.owned;

@@ -147,14 +147,17 @@ static GraphHandle load_final_graph(const char *gname, const char *rel_q, const 
         return get_or_load_graph(gname, nullptr, nullptr, nullptr);
 
     const ProjectedGraph &cached = session_cache_get(gname);
-    if (cached.age_graph.empty() || cached.node_query.empty())
+    if (cached.age_graph.empty())
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("%s: relationship_query requires graph \"%s\" to have its "
                         "age_graph/node_query recorded in the catalog (re-run "
                         "graph_project to populate them)",
                         funcname, cached.name.c_str())));
-    return get_or_load_graph(nullptr, cached.age_graph.c_str(), cached.node_query.c_str(),
+    /* whole-graph projection: every vertex, as the stored node_query is empty */
+    const char *node_q = cached.whole_graph ? "MATCH (n) RETURN id(n) AS id"
+                                            : cached.node_query.c_str();
+    return get_or_load_graph(nullptr, cached.age_graph.c_str(), node_q,
                              rel_q, cached.directed, cached.weighted);
 }
 

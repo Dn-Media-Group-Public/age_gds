@@ -325,9 +325,8 @@ static void diff_apply_reindex(
     for (auto &kv : new_loaded.id_map.graphid_to_nk)
         new_node_gids.insert(kv.first);
 
-    std::unordered_set<int64_t> old_node_gids;
-    for (auto &kv : old_dg.id_map.graphid_to_nk)
-        old_node_gids.insert(kv.first);
+    // graphid -> slot (live nodes). Kept current as nodes are killed/added.
+    auto &slot_of = old_dg.node_slot_by_graphid;
 
     struct OldEdgeInfo { double weight; uint64_t file_slot; };
     std::unordered_map<std::pair<int64_t,int64_t>, OldEdgeInfo, PairHash> old_edges;
@@ -349,32 +348,37 @@ static void diff_apply_reindex(
     });
 
     try {
-        for (int64_t gid : old_node_gids) {
-            if (new_node_gids.count(gid)) continue;
-            uint64_t slot = index_storage_find_node(nodes_path, gid);
-            if (slot != UINT64_MAX)
-                index_storage_kill_node(nodes_path, slot);
-        }
-        for (int64_t gid : new_node_gids) {
-            if (old_node_gids.count(gid)) continue;
-            index_storage_add_node(nodes_path, gid);
-        }
+        {
+            IndexBatchWriter w(nodes_path, edges_path);
 
-        for (auto &kv : old_edges) {
-            if (new_edges.count(kv.first)) continue;
-            index_storage_kill_edge(edges_path, kv.second.file_slot);
-        }
-        for (auto &kv : new_edges) {
-            auto it = old_edges.find(kv.first);
-            if (it == old_edges.end()) {
-                uint64_t src_slot = index_storage_find_node(nodes_path, kv.first.first);
-                uint64_t dst_slot = index_storage_find_node(nodes_path, kv.first.second);
-                if (src_slot == UINT64_MAX || dst_slot == UINT64_MAX)
-                    continue; /* shouldn't happen: node diff ran first */
-                index_storage_add_edge(edges_path, src_slot, dst_slot, kv.second);
-            } else if (it->second.weight != kv.second) {
-                index_storage_set_edge_weight(edges_path, it->second.file_slot, kv.second);
+            std::vector<int64_t> removed;
+            for (auto &kv : slot_of)
+                if (!new_node_gids.count(kv.first)) removed.push_back(kv.first);
+            for (int64_t gid : removed) {
+                w.kill_node(slot_of[gid]);
+                slot_of.erase(gid);
             }
+            for (int64_t gid : new_node_gids)
+                if (!slot_of.count(gid))
+                    slot_of[gid] = w.add_node(gid);
+
+            for (auto &kv : old_edges) {
+                if (new_edges.count(kv.first)) continue;
+                w.kill_edge(kv.second.file_slot);
+            }
+            for (auto &kv : new_edges) {
+                auto it = old_edges.find(kv.first);
+                if (it == old_edges.end()) {
+                    auto s_it = slot_of.find(kv.first.first);
+                    auto d_it = slot_of.find(kv.first.second);
+                    if (s_it == slot_of.end() || d_it == slot_of.end())
+                        continue; /* shouldn't happen: node diff ran first */
+                    w.add_edge(s_it->second, d_it->second, kv.second);
+                } else if (it->second.weight != kv.second) {
+                    w.set_edge_weight(it->second.file_slot, kv.second);
+                }
+            }
+            w.flush();
         }
 
         index_storage_bump_version(nodes_path);
@@ -419,11 +423,7 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
     snprintf(edges_path, MAXPGPATH, "%s/%s.edges", data_dir_str, name_str);
 
     /* ---- Initial whole-graph load ---- */
-    const char *node_q = "MATCH (n) RETURN id(n) AS id";
-    const char *edge_q = "MATCH (a)-[r]->(b) "
-                         "RETURN id(a) AS src, id(b) AS dst, r.weight AS weight";
-
-    LoadedGraph loaded = age_load_graph(age_graph_str, node_q, edge_q,
+    LoadedGraph loaded = age_load_graph(age_graph_str, nullptr, nullptr,
                                         directed, weighted);
 
     /* ---- Write index files ---- */
@@ -445,9 +445,9 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
 
     /* Insert catalog row */
     {
-        Oid   argtypes[9] = {TEXTOID, TEXTOID, INT8OID, INT8OID,
-                              BOOLOID, BOOLOID, TEXTOID, TEXTOID, TEXTOID};
-        Datum args[9]     = {
+        Oid   argtypes[8] = {TEXTOID, TEXTOID, INT8OID, INT8OID,
+                              BOOLOID, BOOLOID, TEXTOID, TEXTOID};
+        Datum args[8]     = {
             CStringGetTextDatum(name_str),
             CStringGetTextDatum(age_graph_str),
             Int64GetDatum(node_count),
@@ -455,15 +455,14 @@ Datum age_gds_graph_index(PG_FUNCTION_ARGS)
             BoolGetDatum(directed),
             BoolGetDatum(weighted),
             CStringGetTextDatum(nodes_path),
-            CStringGetTextDatum(edges_path),
-            CStringGetTextDatum(edge_q)
+            CStringGetTextDatum(edges_path)
         };
         int ret = SPI_execute_with_args(
             "INSERT INTO age_gds.graphs "
             "(name, age_graph, node_count, edge_count, directed, weighted, "
-            " live, incremental, nodes_file_path, edges_file_path, edge_query) "
-            "VALUES ($1, $2, $3, $4, $5, $6, true, true, $7, $8, $9)",
-            9, argtypes, args, nullptr, false, 0);
+            " live, incremental, nodes_file_path, edges_file_path) "
+            "VALUES ($1, $2, $3, $4, $5, $6, true, true, $7, $8)",
+            8, argtypes, args, nullptr, false, 0);
         if (ret != SPI_OK_INSERT)
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
@@ -591,7 +590,7 @@ static void do_graph_reindex(const char *name_str, bool force_is_null, bool forc
                             "incremental mode (force := false is invalid)",
                             name_str)));
 
-        if (age_graph[0] == '\0' || node_query[0] == '\0' || edge_query[0] == '\0')
+        if (age_graph[0] == '\0' || (node_query[0] == '\0') != (edge_query[0] == '\0'))
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("graph_reindex: snapshot \"%s\" is missing queries",
@@ -645,7 +644,7 @@ static void do_graph_reindex(const char *name_str, bool force_is_null, bool forc
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("graph_reindex: \"%s\" has no file paths", name_str)));
-        if (age_graph[0] == '\0' || node_query[0] == '\0' || edge_query[0] == '\0')
+        if (age_graph[0] == '\0' || (node_query[0] == '\0') != (edge_query[0] == '\0'))
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("graph_reindex: \"%s\" is missing queries", name_str)));
@@ -698,10 +697,7 @@ static void do_graph_reindex(const char *name_str, bool force_is_null, bool forc
             /* Full re-load from AGE: rediscover labels, rebuild slot files
              * from scratch. Triggers already installed stay installed;
              * install any missing ones for newly-discovered labels. */
-            const char *node_q = "MATCH (n) RETURN id(n) AS id";
-            const char *edge_q = "MATCH (a)-[r]->(b) "
-                                 "RETURN id(a) AS src, id(b) AS dst, r.weight AS weight";
-            LoadedGraph loaded = age_load_graph(age_graph, node_q, edge_q,
+            LoadedGraph loaded = age_load_graph(age_graph, nullptr, nullptr,
                                                 is_directed, is_weighted);
             rebuild_slot_files_from_scratch(nodes_path, edges_path, loaded,
                                             is_directed, is_weighted);

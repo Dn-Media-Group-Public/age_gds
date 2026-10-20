@@ -1701,9 +1701,9 @@ Datum age_gds_mincostmaxflow_stats(PG_FUNCTION_ARGS)
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("capacity_property is required")));
     const char *cap_prop = text_to_cstring(PG_GETARG_TEXT_PP(1));
-    if (pg.age_graph.empty() || pg.edge_query.empty())
+    if (pg.age_graph.empty())
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                        errmsg("minCostMaxFlow_stats: graph must have age_graph/edge_query "
+                        errmsg("minCostMaxFlow_stats: graph must have age_graph "
                                "recorded (re-run graph_project/graph_index)")));
 
     NetworKit::Graph cap_graph;
@@ -1882,9 +1882,9 @@ Datum age_gds_mincostmaxflow_stats_cypher(PG_FUNCTION_ARGS)
     if (!cfg.get_string("capacityProperty", cap_prop))
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("config.capacityProperty is required")));
-    if (pg.age_graph.empty() || pg.edge_query.empty())
+    if (pg.age_graph.empty())
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                        errmsg("minCostMaxFlow_stats: graph must have age_graph/edge_query "
+                        errmsg("minCostMaxFlow_stats: graph must have age_graph "
                                "recorded (re-run graph_project/graph_index)")));
 
     NetworKit::Graph cap_graph;
