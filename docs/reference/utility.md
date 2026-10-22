@@ -31,17 +31,12 @@ age_gds.jsonb_to_agtype(j jsonb) RETURNS ag_catalog.agtype
 ```
 
 Convert between AGE's `agtype` and Postgres's built-in `jsonb`, both ways.
-Also registered as explicit casts:
-
-```sql
-properties::jsonb                  -- ag_catalog.agtype AS jsonb
-'{"a": 1}'::jsonb::ag_catalog.agtype  -- jsonb AS ag_catalog.agtype
-```
-
-Both casts are explicit-only (no `AS IMPLICIT`/`AS ASSIGNMENT`) — a plain
-`::` cast works with either, but neither will be picked up by implicit
-coercion or function overload resolution. `STRICT`: a `NULL` input returns
-`NULL`, not an error.
+No casts are registered by `age_gds`: AGE >= 1.8.0 provides its own explicit
+`agtype`<->`jsonb` casts, so `properties::jsonb` and
+`'{"a": 1}'::jsonb::ag_catalog.agtype` work through AGE's cast (a second
+`CREATE CAST` would fail with "cast ... already exists"). On AGE < 1.8.0 call
+these functions explicitly. `STRICT`: a `NULL` input returns `NULL`, not an
+error.
 
 **Only plain scalar/map/array `agtype` values round-trip** — a full vertex,
 edge, or path value (e.g. `n` from `MATCH (n) RETURN n`) is rendered by
@@ -57,7 +52,7 @@ otherwise fetch `properties::text`, strip AGE's `::vertex`/`::edge`/`::path`
 suffix, and `json.loads` it themselves. Casting to `jsonb` server-side
 (`properties::jsonb`) lets `psycopg2`'s existing built-in `jsonb` adapter
 decode the value automatically, with no client-side parsing at all. The
-reverse cast exists for symmetry and for write-path callers building a
+reverse direction exists for symmetry and for write-path callers building a
 `jsonb` value client-side that they want to store in an AGE property.
 
 **Cypher**
